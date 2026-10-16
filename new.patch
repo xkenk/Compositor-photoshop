@@ -1,0 +1,2614 @@
+diff --git a/Compositor.xcodeproj/project.pbxproj b/Compositor.xcodeproj/project.pbxproj
+index c2b3a24..430464f 100644
+--- a/Compositor.xcodeproj/project.pbxproj
++++ b/Compositor.xcodeproj/project.pbxproj
+@@ -283,7 +283,7 @@
+ 			isa = XCBuildConfiguration;
+ 			buildSettings = {
+ 				ALWAYS_SEARCH_USER_PATHS = NO;
+-				ARCHS = arm64;
++				ARCHS = "$(ARCHS_STANDARD)";
+ 				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+ 				CLANG_ANALYZER_NONNULL = YES;
+ 				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+@@ -335,7 +335,7 @@
+ 				GCC_WARN_UNUSED_FUNCTION = YES;
+ 				GCC_WARN_UNUSED_VARIABLE = YES;
+ 				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+-				MACOSX_DEPLOYMENT_TARGET = 26.0;
++				MACOSX_DEPLOYMENT_TARGET = 12.0;
+ 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+ 				MTL_FAST_MATH = YES;
+ 				ONLY_ACTIVE_ARCH = YES;
+@@ -350,7 +350,7 @@
+ 			isa = XCBuildConfiguration;
+ 			buildSettings = {
+ 				ALWAYS_SEARCH_USER_PATHS = NO;
+-				ARCHS = arm64;
++				ARCHS = "$(ARCHS_STANDARD)";
+ 				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+ 				CLANG_ANALYZER_NONNULL = YES;
+ 				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+@@ -396,7 +396,7 @@
+ 				GCC_WARN_UNUSED_FUNCTION = YES;
+ 				GCC_WARN_UNUSED_VARIABLE = YES;
+ 				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+-				MACOSX_DEPLOYMENT_TARGET = 26.0;
++				MACOSX_DEPLOYMENT_TARGET = 12.0;
+ 				MTL_ENABLE_DEBUG_INFO = NO;
+ 				MTL_FAST_MATH = YES;
+ 				SDKROOT = macosx;
+@@ -493,7 +493,7 @@
+ 				DEAD_CODE_STRIPPING = YES;
+ 				DEVELOPMENT_TEAM = 3E4X3B9Z9T;
+ 				GENERATE_INFOPLIST_FILE = YES;
+-				MACOSX_DEPLOYMENT_TARGET = 26.0;
++				MACOSX_DEPLOYMENT_TARGET = 12.0;
+ 				MARKETING_VERSION = 1.5.2;
+ 				PRODUCT_BUNDLE_IDENTIFIER = com.wonderassembly.compositor.tests;
+ 				PRODUCT_NAME = "$(TARGET_NAME)";
+@@ -515,7 +515,7 @@
+ 				DEAD_CODE_STRIPPING = YES;
+ 				DEVELOPMENT_TEAM = 3E4X3B9Z9T;
+ 				GENERATE_INFOPLIST_FILE = YES;
+-				MACOSX_DEPLOYMENT_TARGET = 26.0;
++				MACOSX_DEPLOYMENT_TARGET = 12.0;
+ 				MARKETING_VERSION = 1.5.2;
+ 				PRODUCT_BUNDLE_IDENTIFIER = com.wonderassembly.compositor.tests;
+ 				PRODUCT_NAME = "$(TARGET_NAME)";
+diff --git a/Compositor/CompositorApp.swift b/Compositor/CompositorApp.swift
+index d85ae9f..b401c0c 100644
+--- a/Compositor/CompositorApp.swift
++++ b/Compositor/CompositorApp.swift
+@@ -5,24 +5,28 @@ import Sparkle
+ @main
+ struct CompositorApp: App {
+     @NSApplicationDelegateAdaptor(CompositorApplicationDelegate.self) private var applicationDelegate
+-    @AppStorage("navigator.visible") private var showsNavigator = false
+-    private var session: EditorSession { applicationDelegate.session }
+     var body: some Scene {
+-        Window("Compositor", id: "editor") {
++        WindowGroup("Compositor", id: "editor") {
+             ProjectWorkspaceView(applicationDelegate: applicationDelegate).roundedControls()
++                .frame(minWidth: 800, minHeight: 500)
+         }
+-            .defaultSize(width: 1180, height: 780)
+             // Files opened from Finder or dropped on the Dock icon go to the app delegate, which imports them into
+             // the open window. Left to SwiftUI, each one builds a throwaway window and fades the editor out and back.
+             .handlesExternalEvents(matching: [])
+-            // A first launch fills the screen (without going full screen); after that macOS reopens the window at the
+-            // size it was left.
+-            .defaultWindowPlacement { _, context in
+-                WindowPlacement(size: context.defaultDisplay.visibleRect.size)
+-            }
+             // The project's name is already on its tab, so the toolbar doesn't repeat it as a window title.
+             .windowToolbarStyle(.unifiedCompact(showsTitle: false))
+-            .commands {
++            .commands { EditorCommands(applicationDelegate: applicationDelegate) }
++    }
++}
++
++struct EditorCommands: Commands {
++    // Observe changes at the Commands boundary rather than relying on the app delegate
++    // adaptor to invalidate menus when the workspace or its sessions change on Monterey.
++    @ObservedObject var applicationDelegate: CompositorApplicationDelegate
++    @AppStorage("navigator.visible") private var showsNavigator = false
++    private var session: EditorSession { applicationDelegate.session }
++
++    var body: some Commands {
+                 CommandGroup(replacing: .undoRedo) {
+                     // Dialog text fields keep native text undo; document history
+                     // is unavailable while an import or modal edit is active.
+@@ -79,6 +83,9 @@ struct CompositorApp: App {
+                         .configuredKeyboardShortcut("s", modifiers: [.command, .shift])
+                         .disabled(session.document == nil || !applicationDelegate.projects.canStart)
+                     Divider()
++                    Button("Export PNG…".localized) { Task { await applicationDelegate.projects.exportPNG() } }
++                        .configuredKeyboardShortcut("e", modifiers: [.command, .shift])
++                        .disabled(session.document == nil || !applicationDelegate.projects.canStart)
+                     // Export As on JPEG.
+                     Button("Export JPEG…".localized) { Task { await applicationDelegate.projects.exportAs(start: .jpeg) } }
+                         .configuredKeyboardShortcut("s", modifiers: [.command, .option, .shift])
+@@ -221,10 +228,7 @@ struct CompositorApp: App {
+                     Button("Copy Merged".localized) { session.copyMergedSelection() }
+                         .configuredKeyboardShortcut("c", modifiers: [.command, .shift]).disabled(!session.canCopyMerged)
+                     Button("Paste".localized) {
+-                        // On the New canvas screen an image on the clipboard makes the canvas, even with a size field
+-                        // being typed in; a size copied as text still goes into the field.
+-                        if session.canPasteImageAsNewCanvas { Task { await session.pasteImageAsNewCanvas() } }
+-                        else if NSApp.keyWindow?.firstResponder is NSTextView { NSApp.sendAction(#selector(NSText.paste(_:)), to: nil, from: nil) }
++                        if NSApp.keyWindow?.firstResponder is NSTextView { NSApp.sendAction(#selector(NSText.paste(_:)), to: nil, from: nil) }
+                         else if applicationDelegate.workspace.pasteCopiedLayer() { }
+                         else if session.canPaste { session.paste() }
+                         else { NSSound.beep() }
+@@ -392,7 +396,6 @@ struct CompositorApp: App {
+                     }
+                         .disabled(!session.canEditLayers || session.activeLayer == nil)
+                 }
+-            }
+     }
+ 
+     /// View › CMYK › Profile › Load Profile: a CMYK ICC profile picked from anywhere, kept and chosen.
+diff --git a/Compositor/ContentView.swift b/Compositor/ContentView.swift
+index e74e1fa..98dd143 100644
+--- a/Compositor/ContentView.swift
++++ b/Compositor/ContentView.swift
+@@ -5,9 +5,8 @@ struct ContentView: View {
+     /// The Layers panel's width, remembered across launches.
+     @AppStorage("layersPanelWidth") private var layersPanelWidth = 252.0
+     @AppStorage("navigator.visible") private var showsNavigator = false
+-    @Bindable var session: EditorSession
++    @ObservedObject var session: EditorSession
+     var applicationDelegate: CompositorApplicationDelegate? = nil
+-    @Environment(\.openWindow) private var openWindow
+     @State private var canvasFrame: CGRect = .zero
+     @State private var levelsPanel = FloatingPanelController(name: "levelsPanel")
+     @State private var adjustmentPanel = FloatingPanelController(name: "adjustmentPanel")
+@@ -171,7 +170,7 @@ struct ContentView: View {
+                     .allowsHitTesting(false)
+             }
+         }
+-        .onAppear { applicationDelegate?.showEditor = { openWindow(id: "editor") } }
++        .onAppear { applicationDelegate?.showEditor = { CompositorApplicationDelegate.reopen() } }
+         .preferredColorScheme(.dark)
+         // Canvas Only (F): the canvas runs up under where the title bar was, so no gray strip is left across the top.
+         // The toolbar itself is hidden and shown by the window (see `toggleCanvasOnly`), which lays its buttons out
+@@ -185,20 +184,19 @@ struct ContentView: View {
+                     .disabled(session.isImporting || session.showsBusy || session.levels != nil)
+                     .modifier(NewProjectDropTarget(workspace: applicationDelegate?.workspace))
+             }
+-            ToolbarSpacer(.fixed, placement: .navigation)
+-            if let workspace = applicationDelegate?.workspace {
+-                ToolbarItem(placement: .navigation) {
++            ToolbarItem(placement: .navigation) { Spacer().frame(width: 8) }
++            ToolbarItem(placement: .navigation) {
++                if let workspace = applicationDelegate?.workspace {
+                     ProjectTabStrip(workspace: workspace)
+                         // As wide as the toolbar allows: the window less the traffic lights and New button before it
+                         // and the zoom controls after it. Bounded, so adding tabs never pushes those aside; the
+                         // strip scrolls instead.
+                         .frame(width: max(200, windowWidth - 352), height: 34, alignment: .center)
+                 }
+-                .sharedBackgroundVisibility(.hidden)
+             }
+             // Absorb all remaining navigation-toolbar width before the zoom controls.
+             // Without this spacer, the growing tab strip pushes the primary actions left.
+-            ToolbarSpacer(.flexible, placement: .navigation)
++            ToolbarItem(placement: .navigation) { Spacer() }
+             ToolbarItem(placement: .primaryAction) {
+                 Button("Fit".localized) { session.fit() }.help("Fit canvas in window (⌘0)".localized)
+                     .accessibilityIdentifier("fitCanvas").disabled(session.document == nil)
+@@ -432,7 +430,7 @@ private struct PanelResizeEdge: View {
+     var body: some View {
+         Divider().overlay {
+             Color.clear.frame(width: 8).contentShape(Rectangle())
+-                .pointerStyle(.columnResize)
++                .onHover { inside in if inside { NSCursor.resizeLeftRight.push() } else { NSCursor.pop() } }
+                 .gesture(DragGesture(minimumDistance: 1, coordinateSpace: .global)
+                     .onChanged { value in
+                         let start = startWidth ?? width
+@@ -448,7 +446,10 @@ private struct PanelResizeEdge: View {
+ extension View {
+     /// Bordered buttons and pop-up menus drawn as capsules throughout the app. Borderless and plain buttons (the tool
+     /// rail, the Layers panel footer) have no border to shape, so they're unaffected.
+-    func roundedControls() -> some View { buttonBorderShape(.capsule) }
++    @ViewBuilder func roundedControls() -> some View {
++        if #available(macOS 14, *) { buttonBorderShape(.capsule) }
++        else { buttonBorderShape(.roundedRectangle) }
++    }
+ }
+ 
+ extension View {
+diff --git a/Compositor/Document/ColorPalette.swift b/Compositor/Document/ColorPalette.swift
+index c3a810e..0be654c 100644
+--- a/Compositor/Document/ColorPalette.swift
++++ b/Compositor/Document/ColorPalette.swift
+@@ -1,5 +1,5 @@
+ import AppKit
+-import Observation
++import Combine
+ 
+ nonisolated struct PaletteColor: Equatable, Sendable {
+     var red: CGFloat
+@@ -286,14 +286,13 @@ enum ColorPickerTarget: Equatable {
+ }
+ 
+ /// The open color picker's working color. Nothing is written to the palette until OK.
+-@Observable
+-final class ColorPickerState {
++final class ColorPickerState: ObservableObject {
+     let target: ColorPickerTarget
+     var background: Bool { target == .palette(background: true) }
+     let original: PaletteColor
+     /// The foreground picker opened while text was being edited: that text and the color it had.
+-    var editedText: (draftID: UUID, style: LayerTextStyle)?
+-    var hsb: PickerHSB
++    @Published var editedText: (draftID: UUID, style: LayerTextStyle)?
++    @Published var hsb: PickerHSB
+     var color: PaletteColor { hsb.rgb.quantized }
+     init(target: ColorPickerTarget, original: PaletteColor) {
+         self.target = target
+diff --git a/Compositor/Document/ColorRangeSelection.swift b/Compositor/Document/ColorRangeSelection.swift
+index af39824..c7c41eb 100644
+--- a/Compositor/Document/ColorRangeSelection.swift
++++ b/Compositor/Document/ColorRangeSelection.swift
+@@ -1,29 +1,29 @@
+ import AppKit
+-import Observation
++import Combine
+ 
+ /// Select > Color Range: every pixel near the colors clicked on the canvas, anywhere in the image. The panel shows
+ /// the selection live; OK keeps it as one undo step, Cancel puts back the one there was.
+-@MainActor @Observable
+-final class ColorRangeEdit {
++@MainActor
++final class ColorRangeEdit: ObservableObject {
+     static let fuzzinessRange: ClosedRange<Double> = 0...200
+     /// The panel's preview fits in this, in points.
+     nonisolated static let previewSize = CGSize(width: 292, height: 200)
+-    var fuzziness: Double = 40
+-    var invert = false
++    @Published var fuzziness: Double = 40
++    @Published var invert = false
+     /// What the next click on the canvas does: start over from that color, add it, or take it away.
+-    var sampleMode: HueSampleMode = .replace
++    @Published var sampleMode: HueSampleMode = .replace
+     /// Shift (add) or Option (take away) held right now, which a click uses over `sampleMode`.
+-    var held: HueSampleMode?
++    @Published var held: HueSampleMode?
+     var effectiveMode: HueSampleMode { held ?? sampleMode }
+     /// The selection in black and white, small enough for the panel. Nil until a color is picked.
+-    var preview: CGImage?
+-    var include: [UInt8] = []
+-    var exclude: [UInt8] = []
+-    var error: String?
++    @Published var preview: CGImage?
++    @Published var include: [UInt8] = []
++    @Published var exclude: [UInt8] = []
++    @Published var error: String?
+     /// The image as shown, at document size: what the colors are matched against.
+-    @ObservationIgnored let image: CGImage
+-    @ObservationIgnored let original: DocumentSelection?
+-    @ObservationIgnored var generation = 0
++    let image: CGImage
++    let original: DocumentSelection?
++    var generation = 0
+     init(image: CGImage, original: DocumentSelection?) { self.image = image; self.original = original }
+     var hasColors: Bool { !include.isEmpty }
+ }
+diff --git a/Compositor/Document/DocumentHistory.swift b/Compositor/Document/DocumentHistory.swift
+index 059469a..fd4267b 100644
+--- a/Compositor/Document/DocumentHistory.swift
++++ b/Compositor/Document/DocumentHistory.swift
+@@ -1,10 +1,9 @@
+ import Foundation
+ import CoreGraphics
+-import Observation
++import Combine
+ 
+ /// Value snapshots share immutable CGImages; no pixel copies for layer edits.
+-@Observable
+-final class DocumentHistory {
++final class DocumentHistory: ObservableObject {
+     struct Snapshot {
+         let document: CanvasDocument?
+         let activeLayerID: UUID?
+@@ -15,13 +14,13 @@ final class DocumentHistory {
+         let before: Snapshot
+         let after: Snapshot
+     }
+-    private var past: [Entry] = []
+-    private var future: [Entry] = []
+-    private var revision = UUID()
+-    private var savedRevision: UUID?
++    @Published private var past: [Entry] = []
++    @Published private var future: [Entry] = []
++    @Published private var revision = UUID()
++    @Published private var savedRevision: UUID?
+     private var pending: Snapshot?
+     private var pendingName = "Edit"
+-    private var depth = 0
++    @Published private var depth = 0
+     let entryLimit: Int
+     let retainedByteLimit: Int
+ 
+diff --git a/Compositor/Document/EditorSession.swift b/Compositor/Document/EditorSession.swift
+index e0a47ae..b4c3df6 100644
+--- a/Compositor/Document/EditorSession.swift
++++ b/Compositor/Document/EditorSession.swift
+@@ -1,4 +1,5 @@
+ import SwiftUI
++import Combine
+ import UniformTypeIdentifiers
+ 
+ struct ImageLayer: Identifiable, Equatable {
+@@ -117,24 +118,32 @@ enum NavigationTool: String, CaseIterable {
+     }
+ }
+ 
+-@Observable
+-final class EditorSession {
++final class EditorSession: ObservableObject {
++    private var childChanges: [String: AnyCancellable] = [:]
++    init() {
++        observe(history, as: "history")
++        observe(HeldModifiers.shared, as: "modifiers")
++        observe(ShortcutSettings.shared, as: "shortcuts")
++    }
++    private func observe<T: ObservableObject>(_ child: T?, as key: String) where T.ObjectWillChangePublisher == ObservableObjectPublisher {
++        childChanges[key] = child?.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }
++    }
+     var skipsInitialClipboardCanvasSize = false
+-    var document: CanvasDocument?
+-    var canvasFocusRequest = 0
+-    var showsSampleRing = true
+-    var adjustmentOriginal: LayerAdjustment?
+-    var adjustmentEditingID: UUID? { didSet { resumeFileRequests() } }
++    @Published var document: CanvasDocument?
++    @Published var canvasFocusRequest = 0
++    @Published var showsSampleRing = true
++    @Published var adjustmentOriginal: LayerAdjustment?
++    @Published var adjustmentEditingID: UUID? { didSet { resumeFileRequests() } }
+     /// The layer whose effects panel is open.
+-    var effectsEditing: LayerEffectSelection?
+-    var effectsEditingOriginal: LayerEffects?
+-    var effectSelection: LayerEffectSelection?
+-    @ObservationIgnored var effectsPreviews = EffectsPreviewCache()
+-    var projectURL: URL?
++    @Published var effectsEditing: LayerEffectSelection?
++    @Published var effectsEditingOriginal: LayerEffects?
++    @Published var effectSelection: LayerEffectSelection?
++    var effectsPreviews = EffectsPreviewCache()
++    @Published var projectURL: URL?
+     /// Blocks overlapping edits immediately. Not observed by the UI: controls only dim via
+     /// `showsBusy`, after an operation has run long enough to be worth showing, so quick
+     /// edits (invert, fills, stroke commits) never flash the interface.
+-    @ObservationIgnored var isProjectBusy = false {
++    var isProjectBusy = false {
+         didSet {
+             if !isProjectBusy {
+                 let waiters = projectWaiters
+@@ -146,14 +155,14 @@ final class EditorSession {
+         }
+     }
+     /// True once `isProjectBusy` has lasted longer than `busyIndicatorDelay`.
+-    private(set) var showsBusy = false
+-    static let busyIndicatorDelay: Duration = .milliseconds(250)
+-    @ObservationIgnored private var busyIndicatorTask: Task<Void, Never>?
++    @Published private(set) var showsBusy = false
++    static let busyIndicatorDelay: UInt64 = 250_000_000 // Nanoseconds; Task.sleep(for:) requires macOS 13.
++    private var busyIndicatorTask: Task<Void, Never>?
+     private func updateBusyIndicator() {
+         if isProjectBusy {
+             guard busyIndicatorTask == nil, !showsBusy else { return }
+             busyIndicatorTask = Task { @MainActor [weak self] in
+-                try? await Task.sleep(for: Self.busyIndicatorDelay)
++                try? await Task.sleep(nanoseconds: Self.busyIndicatorDelay)
+                 guard let self, !Task.isCancelled, self.isProjectBusy else { return }
+                 self.showsBusy = true
+                 self.busyIndicatorTask = nil
+@@ -186,17 +195,17 @@ final class EditorSession {
+             await withCheckedContinuation { projectWaiters.append($0) }
+         }
+     }
+-    var viewport = CanvasViewport()
+-    var tool: NavigationTool = .move
+-    var collapsedGroupIDs: Set<UUID> = []
+-    var cropRect: CGRect?
+-    var cropRatioChoice = "Free"
+-    var cropError: String?
+-    var transformEdit: TransformEdit?
+-    @ObservationIgnored var distortPreviewCache: [UUID: DistortPreviewCache] = [:]
+-    @ObservationIgnored var distortEffectsCache: [UUID: DistortEffectsCache] = [:]
++    @Published var viewport = CanvasViewport()
++    @Published var tool: NavigationTool = .move
++    @Published var collapsedGroupIDs: Set<UUID> = []
++    @Published var cropRect: CGRect?
++    @Published var cropRatioChoice = "Free"
++    @Published var cropError: String?
++    @Published var transformEdit: TransformEdit?
++    var distortPreviewCache: [UUID: DistortPreviewCache] = [:]
++    var distortEffectsCache: [UUID: DistortEffectsCache] = [:]
+     /// Document positions a move has just snapped to, drawn as guides while it lasts.
+-    @ObservationIgnored var snapGuides: (xs: [CGFloat], ys: [CGFloat]) = ([], [])
++    var snapGuides: (xs: [CGFloat], ys: [CGFloat]) = ([], [])
+     /// Crop, resize and selection moves follow View › Snap (⇧⌘;) too: they had a Snap item of their own, which left
+     /// the View menu with two called Snap.
+     var snappingEnabled: Bool {
+@@ -204,116 +213,116 @@ final class EditorSession {
+         set { snapEnabled = newValue }
+     }
+     /// Where the last brush stroke ended, so a Shift-click paints a straight line on from it.
+-    @ObservationIgnored var lastBrushPoint: (point: CGPoint, layerID: UUID, mask: Bool)?
++    var lastBrushPoint: (point: CGPoint, layerID: UUID, mask: Bool)?
+     /// Where the brush is while Smoothing trails it behind the pointer (see `smoothed`).
+-    @ObservationIgnored var brushAnchor: CGPoint?
++    var brushAnchor: CGPoint?
+     /// The pointer itself, so a smoothed stroke can catch up to it when the button is released.
+-    @ObservationIgnored var brushPointer: CGPoint?
+-    @ObservationIgnored var maskDistortPreviewCache: MaskDistortPreviewCache?
++    var brushPointer: CGPoint?
++    var maskDistortPreviewCache: MaskDistortPreviewCache?
+     /// The last rounded rectangle drawn for a transform in progress, by layer, with the size it was drawn at.
+-    @ObservationIgnored var shapeTransformPreviewCache: [UUID: (size: CGSize, image: CGImage)] = [:]
+-    var locksTransformRatio = true
++    var shapeTransformPreviewCache: [UUID: (size: CGSize, image: CGImage)] = [:]
++    @Published var locksTransformRatio = true
+     /// Off by default: a Move-tool press drags the active layer; hold Cmd (or turn this on) to pick the layer under the pointer.
+-    var transformAutoSelect = ToolDefaults.bool("autoSelect", false) { didSet { ToolDefaults.set(transformAutoSelect, "autoSelect") } }
++    @Published var transformAutoSelect = ToolDefaults.bool("autoSelect", false) { didSet { ToolDefaults.set(transformAutoSelect, "autoSelect") } }
+     /// The Move tool's transform box and handles (⌘H). Hidden, a drag anywhere just moves the layer;
+     /// a pending ⌘T transform still shows its box.
+-    var showsTransformControls = ToolDefaults.bool("transformControls", true) { didSet { ToolDefaults.set(showsTransformControls, "transformControls") } }
++    @Published var showsTransformControls = ToolDefaults.bool("transformControls", true) { didSet { ToolDefaults.set(showsTransformControls, "transformControls") } }
+     /// The copies an Option-drag made, and what was selected before it, so Escape can take them away again.
+-    @ObservationIgnored var transformDuplicate: (copies: [UUID], source: Set<UUID>, primary: UUID?)?
+-    var brushSettings = BrushSettings() { didSet { refreshGradient() } }
+-    var spotHealingMode: SpotHealingMode = .contentAware
+-    var blurMode: BlurToolMode = .liquify
++    var transformDuplicate: (copies: [UUID], source: Set<UUID>, primary: UUID?)?
++    @Published var brushSettings = BrushSettings() { didSet { refreshGradient() } }
++    @Published var spotHealingMode: SpotHealingMode = .contentAware
++    @Published var blurMode: BlurToolMode = .liquify
+     /// The Brush's two modes: Paint lays down the foreground color, Erase clears pixels away (B and E).
+-    var brushMode: BrushToolMode = .paint
++    @Published var brushMode: BrushToolMode = .paint
+     /// The tool rail's icon, which follows the mode a tool is in.
+     func symbol(for tool: NavigationTool) -> String {
+         tool == .brush && brushMode == .erase ? "eraser" : tool.symbol
+     }
+     /// The Magic tool's two modes: Wand selects by color, Object traces the object under the pointer (Tab).
+-    var wandMode: WandMode = .wand
++    @Published var wandMode: WandMode = .wand
+     /// Clone Stamp: the source Option-click set (document pixels), its options, and — once a
+     /// stroke has started — the offset from brush to source that aligned strokes keep.
+-    var cloneSource: CGPoint?
+-    var cloneSettings = CloneSettings()
++    @Published var cloneSource: CGPoint?
++    @Published var cloneSettings = CloneSettings()
+     /// The brush tip (size, hardness, opacity) of the side not in use: Clone Stamp keeps its own,
+     /// soft by default, while Brush and Spot Healing share theirs.
+     /// The tips of the brush families not in use: Clone Stamp and Smear each keep their own size, hardness and
+     /// opacity (both starting soft); the other brushes share one.
+-    @ObservationIgnored var parkedBrushTips: [Int: (diameter: CGFloat, hardness: CGFloat, opacity: CGFloat)] = [1: (40, 0, 1), 2: (40, 0, 1)]
++    var parkedBrushTips: [Int: (diameter: CGFloat, hardness: CGFloat, opacity: CGFloat)] = [1: (40, 0, 1), 2: (40, 0, 1)]
+     private static func tipFamily(_ tool: NavigationTool) -> Int { tool == .cloneStamp ? 1 : tool == .blur ? 2 : 0 }
+-    @ObservationIgnored var cloneOffset: CGSize?
+-    var maskPaintWhite = false { didSet { refreshGradient() } }
+-    var backgroundColor = PaletteColor.white { didSet { refreshGradient() } }
+-    var gradientSettings = GradientSettings() { didSet { refreshGradient() } }
+-    var gradientEdit: GradientEdit?
+-    var lassoDraft: LassoDraft?
+-    var lassoKind = LassoKind.freehand
+-    var marqueeKind = LassoKind.rectangle
+-    var textDraft: TextDraft? { didSet { if oldValue != nil && textDraft == nil { resumeFileRequests() } } }
+-    var textDefaults = LayerTextStyle()
+-    var shapeKind = ShapeKind.rectangle
++    var cloneOffset: CGSize?
++    @Published var maskPaintWhite = false { didSet { refreshGradient() } }
++    @Published var backgroundColor = PaletteColor.white { didSet { refreshGradient() } }
++    @Published var gradientSettings = GradientSettings() { didSet { refreshGradient() } }
++    @Published var gradientEdit: GradientEdit?
++    @Published var lassoDraft: LassoDraft?
++    @Published var lassoKind = LassoKind.freehand
++    @Published var marqueeKind = LassoKind.rectangle
++    @Published var textDraft: TextDraft? { didSet { if oldValue != nil && textDraft == nil { resumeFileRequests() } } }
++    @Published var textDefaults = LayerTextStyle()
++    @Published var shapeKind = ShapeKind.rectangle
+     /// Corner radius in pixels for rectangles the Shape tool draws; 0 keeps the corners square.
+-    var shapeCornerRadius: Double = 0
++    @Published var shapeCornerRadius: Double = 0
+     var shapeSmoothing = false
+     /// A Line shape's thickness in document pixels.
+-    var shapeLineWidth: Double = 4
++    @Published var shapeLineWidth: Double = 4
+     /// The shape being dragged out with the Shape tool, before it becomes a layer.
+-    var shapeDraft: ShapeDraft?
+-    var selectionModeChoice = SelectionMode.replace
++    @Published var shapeDraft: ShapeDraft?
++    @Published var selectionModeChoice = SelectionMode.replace
+     /// Mode implied by the Shift/Option keys currently held, nil when neither is.
+-    var heldSelectionMode: SelectionMode?
++    @Published var heldSelectionMode: SelectionMode?
+     /// The selection as it was when a drag-move began; the drag is one undo step.
+-    @ObservationIgnored var selectionMoveOrigin: DocumentSelection?
+-    var pixelMove: PixelMove?
+-    @ObservationIgnored var pixelClipboard: PixelClipboard?
+-    @ObservationIgnored var copiedLayer: CopiedLayer?
+-    var levels: LevelsEdit? { didSet { resumeFileRequests() } }
+-    var hueSaturation: HueSaturationEdit?
++    var selectionMoveOrigin: DocumentSelection?
++    @Published var pixelMove: PixelMove?
++    var pixelClipboard: PixelClipboard?
++    var copiedLayer: CopiedLayer?
++    @Published var levels: LevelsEdit? { didSet { observe(levels, as: "levels"); resumeFileRequests() } }
++    @Published var hueSaturation: HueSaturationEdit? { didSet { observe(hueSaturation, as: "hueSaturation") } }
+     /// The open filter (Filter menu), and the settings the next one starts from.
+-    var filterEdit: FilterEdit?
+-    var filterSettings = FilterSettings()
++    @Published var filterEdit: FilterEdit? { didSet { observe(filterEdit, as: "filter") } }
++    @Published var filterSettings = FilterSettings()
+     /// What Filter › Last Filter runs again.
+-    var lastFilter: FilterKind?
+-    @ObservationIgnored var hueSaturationTask: Task<Void, Never>?
++    @Published var lastFilter: FilterKind?
++    var hueSaturationTask: Task<Void, Never>?
+     /// The newest preview request while one is already rendering.
+-    @ObservationIgnored var hueSaturationPending: HueSaturationJob?
++    var hueSaturationPending: HueSaturationJob?
+     /// The armed eyedropper and the targeted-adjustment tool, while the panel is open.
+-    var hueSampleMode: HueSampleMode?
+-    var hueTargeting = false
+-    @ObservationIgnored var hueTargetDrag: HueTargetDrag?
+-    var selectionAntialiased = true
++    @Published var hueSampleMode: HueSampleMode?
++    @Published var hueTargeting = false
++    var hueTargetDrag: HueTargetDrag?
++    @Published var selectionAntialiased = true
+     /// How far Feather softens the selection's edge each time it is applied, in document pixels.
+-    var selectionAmountOperation: SelectionAmountOperation? { didSet { resumeFileRequests() } }
++    @Published var selectionAmountOperation: SelectionAmountOperation? { didSet { resumeFileRequests() } }
+     /// Select > Color Range's panel is open; the selection shown is its preview until OK.
+-    var colorRange: ColorRangeEdit? { didSet { resumeFileRequests() } }
++    @Published var colorRange: ColorRangeEdit? { didSet { observe(colorRange, as: "colorRange"); resumeFileRequests() } }
+     /// The dialog whose color the picker is open on (`ColorPickerTarget.dialog`).
+-    @ObservationIgnored var dialogColorChange: ((PaletteColor) -> Void)?
++    var dialogColorChange: ((PaletteColor) -> Void)?
+     /// A dialog with its own zoomable preview (Export JPEG) is open: the View menu's zoom commands zoom that instead.
+-    @ObservationIgnored var previewZoom: ((PreviewZoomCommand) -> Void)?
++    var previewZoom: ((PreviewZoomCommand) -> Void)?
+     /// The text's style before the font menu started previewing faces on it (see `previewFont`).
+-    @ObservationIgnored var fontPreviewOriginal: LayerTextStyle?
+-    var selectionFeatherAmount = 2
+-    var wandSettings = WandSettings()
+-    var objectSelectionSettings = ObjectSelectionSettings()
+-    var showsPixelGrid = ToolDefaults.bool("pixelGrid", true) { didSet { ToolDefaults.set(showsPixelGrid, "pixelGrid") } }
++    var fontPreviewOriginal: LayerTextStyle?
++    @Published var selectionFeatherAmount = 2
++    @Published var wandSettings = WandSettings()
++    @Published var objectSelectionSettings = ObjectSelectionSettings()
++    @Published var showsPixelGrid = ToolDefaults.bool("pixelGrid", true) { didSet { ToolDefaults.set(showsPixelGrid, "pixelGrid") } }
+     /// View › CMYK › Proof Colors: the canvas as printing through `proofProfile` would show it, on white paper (`CMYK`).
+-    var proofsColors = false { didSet { if proofsColors, proofProfile == nil { proofProfile = CMYK.chosen }; brushRevision += 1 } }
++    @Published var proofsColors = false { didSet { if proofsColors, proofProfile == nil { proofProfile = CMYK.chosen }; brushRevision += 1 } }
+     /// View › CMYK › Gamut Warning: colors the profile can't print as they are show gray, over the proof or the document's
+     /// own colors.
+-    var showsGamutWarning = false { didSet { if showsGamutWarning, proofProfile == nil { proofProfile = CMYK.chosen }; brushRevision += 1 } }
++    @Published var showsGamutWarning = false { didSet { if showsGamutWarning, proofProfile == nil { proofProfile = CMYK.chosen }; brushRevision += 1 } }
+     /// The CMYK profile proofing and CMYK export use, as View › CMYK › Profile last set it.
+-    var proofProfile: CMYKProfile? { didSet { CMYK.chosen = proofProfile; brushRevision += 1 } }
++    @Published var proofProfile: CMYKProfile? { didSet { CMYK.chosen = proofProfile; brushRevision += 1 } }
+     /// Layout grid (View > Show > Grid). Off until turned on; independent of the 800% pixel grid.
+-    var showsGrid = ToolDefaults.bool("grid", false) { didSet { ToolDefaults.set(showsGrid, "grid") } }
++    @Published var showsGrid = ToolDefaults.bool("grid", false) { didSet { ToolDefaults.set(showsGrid, "grid") } }
+     /// The layout grid's spacing and subdivisions (View > Grid Settings…). The person's, not the project's.
+-    var layoutGrid = LayoutGrid(spacing: ToolDefaults.int("gridSpacing", 64), subdivisions: ToolDefaults.int("gridSubdivisions", 8)) {
++    @Published var layoutGrid = LayoutGrid(spacing: ToolDefaults.int("gridSpacing", 64), subdivisions: ToolDefaults.int("gridSubdivisions", 8)) {
+         didSet {
+             ToolDefaults.set(layoutGrid.spacing, "gridSpacing")
+             ToolDefaults.set(layoutGrid.subdivisions, "gridSubdivisions")
+         }
+     }
+     /// The layout grid's color, line style and opacity (View > Grid Settings…), also the person's.
+-    var gridAppearance = GridAppearance(
++    @Published var gridAppearance = GridAppearance(
+         preset: GridAppearance.Preset(rawValue: ToolDefaults.string("gridColor", "")) ?? .lightGray,
+         customColor: PaletteColor(hex: ToolDefaults.string("gridCustomColor", "")) ?? GridAppearance().customColor,
+         style: GridAppearance.Style(rawValue: ToolDefaults.string("gridStyle", "")) ?? .lines,
+@@ -326,9 +335,9 @@ final class EditorSession {
+         }
+     }
+     /// User guides. Hidden extras do not snap.
+-    var showsGuides = ToolDefaults.bool("guides", true) { didSet { ToolDefaults.set(showsGuides, "guides") } }
++    @Published var showsGuides = ToolDefaults.bool("guides", true) { didSet { ToolDefaults.set(showsGuides, "guides") } }
+     /// F: the canvas alone on black, filling the screen, with every panel and bar put away. F again brings them back.
+-    var canvasOnly = false
++    @Published var canvasOnly = false
+     /// Nothing in progress for Escape to cancel (a transform, crop, lasso, shape, gradient, stroke or text), so in
+     /// fullscreen it leaves fullscreen instead.
+     var escapeHasNothingToCancel: Bool {
+@@ -343,33 +352,33 @@ final class EditorSession {
+             && colorPicker == nil && adjustmentEditingID == nil && effectsEditing == nil && colorRange == nil
+             && selectionAmountOperation == nil
+     }
+-    var showsRulers = ToolDefaults.bool("rulers", false) { didSet { ToolDefaults.set(showsRulers, "rulers") } }
++    @Published var showsRulers = ToolDefaults.bool("rulers", false) { didSet { ToolDefaults.set(showsRulers, "rulers") } }
+     /// Master snap switch (View > Snap). On so today's layer/canvas snap keeps working.
+-    var snapEnabled = ToolDefaults.bool("snap", true) {
++    @Published var snapEnabled = ToolDefaults.bool("snap", true) {
+         didSet {
+             ToolDefaults.set(snapEnabled, "snap")
+             if !snapEnabled { snapGuides = ([], []) }
+             refreshCanvasPreview?()
+         }
+     }
+-    var snapToGuides = ToolDefaults.bool("snapGuides", true) { didSet { ToolDefaults.set(snapToGuides, "snapGuides") } }
+-    var snapToGrid = ToolDefaults.bool("snapGrid", false) { didSet { ToolDefaults.set(snapToGrid, "snapGrid") } }
+-    var snapToLayers = ToolDefaults.bool("snapLayers", true) { didSet { ToolDefaults.set(snapToLayers, "snapLayers") } }
+-    var snapToDocumentBounds = ToolDefaults.bool("snapBounds", true) { didSet { ToolDefaults.set(snapToDocumentBounds, "snapBounds") } }
+-    var locksGuides = ToolDefaults.bool("lockGuides", false) { didSet { ToolDefaults.set(locksGuides, "lockGuides") } }
+-    var guideDrag: GuideDrag?
++    @Published var snapToGuides = ToolDefaults.bool("snapGuides", true) { didSet { ToolDefaults.set(snapToGuides, "snapGuides") } }
++    @Published var snapToGrid = ToolDefaults.bool("snapGrid", false) { didSet { ToolDefaults.set(snapToGrid, "snapGrid") } }
++    @Published var snapToLayers = ToolDefaults.bool("snapLayers", true) { didSet { ToolDefaults.set(snapToLayers, "snapLayers") } }
++    @Published var snapToDocumentBounds = ToolDefaults.bool("snapBounds", true) { didSet { ToolDefaults.set(snapToDocumentBounds, "snapBounds") } }
++    @Published var locksGuides = ToolDefaults.bool("lockGuides", false) { didSet { ToolDefaults.set(locksGuides, "lockGuides") } }
++    @Published var guideDrag: GuideDrag?
+     /// Pixels the Expand / Contract buttons grow or shrink the selection by.
+-    var selectionExpandAmount = 1
+-    var selectionContractAmount = 1
+-    @ObservationIgnored var pendingOpacityDigit: (digit: Int, time: TimeInterval)?
+-    var colorPicker: ColorPickerState?
+-    var brushError: String?
+-    var brushRevision = 0
++    @Published var selectionExpandAmount = 1
++    @Published var selectionContractAmount = 1
++    var pendingOpacityDigit: (digit: Int, time: TimeInterval)?
++    @Published var colorPicker: ColorPickerState? { didSet { observe(colorPicker, as: "colorPicker") } }
++    @Published var brushError: String?
++    @Published var brushRevision = 0
+     /// Not observed by the UI, so controls don't dim for the length of every stroke;
+     /// a stroke keeps the settings it started with, so edits made mid-stroke are harmless.
+-    @ObservationIgnored var brushStroke: BrushStroke? { didSet { resumeFileRequests() } }
++    var brushStroke: BrushStroke? { didSet { resumeFileRequests() } }
+     /// A Smudge or Liquify stroke in progress.
+-    @ObservationIgnored var warpStroke: WarpStroke? { didSet { resumeFileRequests() } }
++    var warpStroke: WarpStroke? { didSet { resumeFileRequests() } }
+ 
+     var canTransform: Bool {
+         guard canEditLayers else { return false }
+@@ -595,25 +604,26 @@ final class EditorSession {
+         if let corners = transformEdit?.corners { previewCorners(corners.map { CGPoint(x: $0.x + dx, y: $0.y + dy) }) }
+         if !alreadyEditing { commitTransform() }
+     }
+-    var showsNewDocument = false { didSet { resumeFileRequests() } }
+-    var showsImporter = false { didSet { resumeFileRequests() } }
+-    var isImporting = false { didSet { resumeFileRequests() } }
+-    var importError: String? { didSet { resumeFileRequests() } }
+-    var showsConversionSheet = false { didSet { resumeFileRequests() } }
+-    var conversionRequest: PSDConversionRequest?
+-    /// Tests assign this to skip the conversion sheet.
+-    @ObservationIgnored var confirmConversions: (([PSDConversion]) async -> Bool)?
++    @Published var showsNewDocument = false { didSet { resumeFileRequests() } }
++    @Published var showsImporter = false { didSet { resumeFileRequests() } }
++    @Published var isImporting = false { didSet { resumeFileRequests() } }
++    @Published var importError: String? { didSet { resumeFileRequests() } }
++    @Published var showsConversionSheet = false { didSet { resumeFileRequests() } }
++    @Published var conversionRequest: PSDConversionRequest?
++    /// Tests assign this to skip the conversion sheet. Explicit actor isolation also keeps the stored
++    /// function's metadata compatible with macOS 12 when Combine reflects this session's fields.
++    var confirmConversions: (@MainActor ([PSDConversion]) async -> Bool)?
+     /// The RAW file being developed, and the settings the sheet is editing (see RawImporter).
+-    var rawDevelop: (url: URL, settings: RawDevelopSettings)?
+-    var showsRawDevelop = false { didSet { resumeFileRequests() } }
++    @Published var rawDevelop: (url: URL, settings: RawDevelopSettings)?
++    @Published var showsRawDevelop = false { didSet { resumeFileRequests() } }
+     /// Import was pressed and the full frame is developing: the sheet stays up, showing that, until the layer is in.
+-    var rawImporting = false
++    @Published var rawImporting = false
+     /// Camera Raw… was pressed: once the import is done, the Camera Raw Filter opens on the RAW's layer.
+-    @ObservationIgnored private var rawOpensCameraRaw = false
+-    @ObservationIgnored private var cameraRawAfterImport: UUID?
+-    @ObservationIgnored private var rawContinuation: CheckedContinuation<RawDevelopSettings?, Never>?
++    private var rawOpensCameraRaw = false
++    private var cameraRawAfterImport: UUID?
++    private var rawContinuation: CheckedContinuation<RawDevelopSettings?, Never>?
+     /// Tests assign this to develop without a sheet.
+-    @ObservationIgnored var confirmRawDevelop: ((URL, RawDevelopSettings) async -> RawDevelopSettings?)?
++    var confirmRawDevelop: (@MainActor (URL, RawDevelopSettings) async -> RawDevelopSettings?)?
+ 
+     /// Puts the develop sheet up and waits for the choice; nil means the import was cancelled.
+     func developRaw(_ url: URL) async -> RawDevelopSettings? {
+@@ -640,29 +650,29 @@ final class EditorSession {
+         rawDevelop = nil
+         Task { await RawImporter.Queue.shared.release() }
+     }
+-    @ObservationIgnored private var conversionContinuation: CheckedContinuation<Bool, Never>?
++    private var conversionContinuation: CheckedContinuation<Bool, Never>?
+     /// Cancel pressed while a Photoshop file was still being read.
+-    @ObservationIgnored private var conversionCancelled = false
+-    var opacityEditLayerID: UUID?
+-    var blendPreview: (layerID: UUID, mode: LayerBlendMode)?
+-    @ObservationIgnored var refreshCanvasPreview: (() -> Void)?
+-    var isMaskSelected = false { didSet { if !isMaskSelected { viewsMaskAlone = false } } }
++    private var conversionCancelled = false
++    @Published var opacityEditLayerID: UUID?
++    @Published var blendPreview: (layerID: UUID, mode: LayerBlendMode)?
++    var refreshCanvasPreview: (() -> Void)?
++    @Published var isMaskSelected = false { didSet { if !isMaskSelected { viewsMaskAlone = false } } }
+     /// Option-click on a mask thumbnail: the canvas shows the targeted mask by itself, in grayscale, so it can be
+     /// painted with nothing else in the way, as in Photoshop. Targeting the layer's pixels, or another layer, ends it.
+-    var viewsMaskAlone = false
++    @Published var viewsMaskAlone = false
+     /// The layer whose mask the canvas is showing by itself; nil for the ordinary composite.
+     var maskAloneLayer: ImageLayer? {
+         guard viewsMaskAlone, isMaskSelected, let layer = activeLayer, layer.mask != nil else { return nil }
+         return layer
+     }
+-    var selectedLayerIDs: Set<UUID> = []
+-    var activeLayerID: UUID? {
++    @Published var selectedLayerIDs: Set<UUID> = []
++    @Published var activeLayerID: UUID? {
+         didSet {
+             if activeLayerID != oldValue { isMaskSelected = false }
+             selectedLayerIDs = activeLayerID.map { [$0] } ?? []
+         }
+     }
+-    var renamingLayerID: UUID? { didSet { resumeFileRequests() } }
++    @Published var renamingLayerID: UUID? { didSet { resumeFileRequests() } }
+     let history = DocumentHistory()
+     var isModified: Bool { history.isModified }
+     var canUseHistory: Bool {
+diff --git a/Compositor/Document/Filters.swift b/Compositor/Document/Filters.swift
+index 2ab0486..82035d1 100644
+--- a/Compositor/Document/Filters.swift
++++ b/Compositor/Document/Filters.swift
+@@ -1,6 +1,6 @@
+ import AppKit
+ import CoreImage
+-import Observation
++import Combine
+ 
+ /// Filters from the Filter menu. Each runs on the active image layer, inside the selection if
+ /// there is one, with a live preview and one undo step on OK.
+@@ -426,101 +426,100 @@ nonisolated enum PixelFilter {
+     }
+ }
+ 
+-@Observable
+-final class FilterEdit {
++final class FilterEdit: ObservableObject {
+     let kind: FilterKind
+     /// Filter › Last Filter, applied straight away with the settings it had.
+-    var repeating = false
++    @Published var repeating = false
+     let layerID: UUID
+     let original: ImportedImage
+     let transform: LayerTransform
+     let selection: SelectionClip?
+-    var mapping: CGAffineTransform
+-    var previewSource: CGImage
++    @Published var mapping: CGAffineTransform
++    @Published var previewSource: CGImage
+     /// An HDR layer's pixels at the preview's size and grid, which its preview is made from, as OK makes the result from
+     /// the layer's own: from `previewSource`, clipped to white, a blur or Exposure would preview something else.
+-    var hdrPreviewSource: CGImage?
+-    var previewScale: CGFloat
+-    var previewMapping: CGAffineTransform
++    @Published var hdrPreviewSource: CGImage?
++    @Published var previewScale: CGFloat
++    @Published var previewMapping: CGAffineTransform
+     /// A filter reaching past the layer's edge — Content-Aware Fill over a selection, a blur spreading outwards —
+     /// works on the layer's pixels padded out, and on the transform placing that larger grid.
+-    var grownImage: CGImage? = nil
+-    var grownTransform: LayerTransform? = nil
++    @Published var grownImage: CGImage? = nil
++    @Published var grownTransform: LayerTransform? = nil
+     /// Where the layer's own pixels sit within `grownImage`, so a 16-bit layer's pixels can be padded the same way.
+-    var grownInside: CGRect? = nil
++    @Published var grownInside: CGRect? = nil
+     /// How far the padding reaches beyond the layer on every side, in layer pixels.
+-    var grownMargin: CGFloat = 0
++    @Published var grownMargin: CGFloat = 0
+     /// The layer's sides at or past the canvas's edge, where Gaussian and Motion Blur carry its edge pixels on rather
+     /// than spreading into clear ones: they're given no padding.
+     private(set) var canvasSides: LayerSides = []
+-    var settings: FilterSettings
+-    var preview = true
+-    var committing = false
+-    var previewError: String?
+-    var preparing = false
++    @Published var settings: FilterSettings
++    @Published var preview = true
++    @Published var committing = false
++    @Published var previewError: String?
++    @Published var preparing = false
+     /// Add Noise's grain, fixed while the panel is open so changing Amount doesn't reshuffle it.
+     let seed = UInt32.random(in: .min ... .max)
+     /// Camera Raw panel eyes. Off drops that group's amounts from the preview and from OK, without clearing the sliders.
+-    var showsCameraRawLight = true
+-    var showsCameraRawColor = true
+-    var showsCameraRawEffects = true
+-    var showsCameraRawCurve = true
+-    var showsCameraRawMixer = true
+-    var showsCameraRawGrading = true
+-    var showsCameraRawDetail = true
+-    var showsCameraRawOptics = true
+-    var showsCameraRawGeometry = true
+-    var showsCameraRawCalibration = true
+-    var cameraRawCurvePage: CameraRawCurvePage = .parametric
+-    var cameraRawPointChannel: CameraRawPointChannel = .rgb
+-    var cameraRawMixerPage: CameraRawMixerPage = .hsl
+-    var cameraRawMixerTab: CameraRawMixerTab = .hue
+-    var cameraRawMixerSwatch = 0
+-    var cameraRawPointIndex = 0
+-    var cameraRawGradePage: CameraRawGradePage = .threeWay
+-    var targetsCameraRawCurve = false
+-    var targetsCameraRawMixer = false
+-    var samplesPointColor = false
+-    var cameraRawDrag: CameraRawDrag?
++    @Published var showsCameraRawLight = true
++    @Published var showsCameraRawColor = true
++    @Published var showsCameraRawEffects = true
++    @Published var showsCameraRawCurve = true
++    @Published var showsCameraRawMixer = true
++    @Published var showsCameraRawGrading = true
++    @Published var showsCameraRawDetail = true
++    @Published var showsCameraRawOptics = true
++    @Published var showsCameraRawGeometry = true
++    @Published var showsCameraRawCalibration = true
++    @Published var cameraRawCurvePage: CameraRawCurvePage = .parametric
++    @Published var cameraRawPointChannel: CameraRawPointChannel = .rgb
++    @Published var cameraRawMixerPage: CameraRawMixerPage = .hsl
++    @Published var cameraRawMixerTab: CameraRawMixerTab = .hue
++    @Published var cameraRawMixerSwatch = 0
++    @Published var cameraRawPointIndex = 0
++    @Published var cameraRawGradePage: CameraRawGradePage = .threeWay
++    @Published var targetsCameraRawCurve = false
++    @Published var targetsCameraRawMixer = false
++    @Published var samplesPointColor = false
++    @Published var cameraRawDrag: CameraRawDrag?
+     var pointColorVisualizeIndex: Int {
+         let points = settings.cameraRaw.mixer.points
+         guard points.indices.contains(cameraRawPointIndex), points[cameraRawPointIndex].visualize else { return -1 }
+         return cameraRawPointIndex
+     }
+     /// White-balance eyedropper, armed from the Color section.
+-    var samplesWhiteBalance = false
++    @Published var samplesWhiteBalance = false
+     /// Defringe eyedropper, armed from Optics. Sets purple or green hue range from the clicked fringe.
+-    var samplesDefringe = false
++    @Published var samplesDefringe = false
+     /// Guided Upright: drag lines on the preview.
+-    var drawingCameraRawGeometryGuide = false
+-    var cameraRawGuideDraft: (start: CGPoint, end: CGPoint)?
++    @Published var drawingCameraRawGeometryGuide = false
++    @Published var cameraRawGuideDraft: (start: CGPoint, end: CGPoint)?
+     /// Set while Option is held on Exposure, Highlights, Shadows, Whites, or Blacks.
+-    var cameraRawClipping: CameraRawClipping?
++    @Published var cameraRawClipping: CameraRawClipping?
+     /// Set while Option is held on Sharpening Masking.
+-    var cameraRawSharpenMask = false
++    @Published var cameraRawSharpenMask = false
+     /// Histogram clipping indicators. They paint the preview and are not baked in on OK.
+-    var showsShadowClipping = false
+-    var showsHighlightClipping = false
++    @Published var showsShadowClipping = false
++    @Published var showsHighlightClipping = false
+     /// Histogram, or the vectorscope chosen from its context menu.
+-    var cameraRawScopeMode: CameraRawScopeMode = .histogram
+-    var cameraRawScope: CameraRawScope?
++    @Published var cameraRawScopeMode: CameraRawScopeMode = .histogram
++    @Published var cameraRawScope: CameraRawScope?
+     /// RGB of the pixel under the pointer, in the adjusted preview.
+-    var cameraRawReadout: (red: Int, green: Int, blue: Int)?
++    @Published var cameraRawReadout: (red: Int, green: Int, blue: Int)?
+     /// Vignette on an empty layer: the canvas it frames and fills.
+-    @ObservationIgnored var canvas: CGRect?
++    var canvas: CGRect?
+     /// The layer had no pixels yet (an empty layer); the filter started it from clear ones.
+-    @ObservationIgnored var startedEmpty = false
+-    @ObservationIgnored var preparedPreview: CGImage?
++    var startedEmpty = false
++    var preparedPreview: CGImage?
+     /// Where `preparedPreview` goes: the grown layer it was made from, or nil for the layer's own place. A blur grows
+     /// the layer as it gets bigger; the last preview stays up where it belongs until the next one replaces it.
+-    @ObservationIgnored var preparedTransform: LayerTransform?
++    var preparedTransform: LayerTransform?
+     /// The grown layer `pending` is made from.
+-    @ObservationIgnored var pendingTransform: LayerTransform?
++    var pendingTransform: LayerTransform?
+     /// Reject a render started before the blur's padded pixel grid changed.
+-    @ObservationIgnored var previewSourceVersion: UInt64 = 0
++    var previewSourceVersion: UInt64 = 0
+     /// Camera Raw's adaptive sliders read the picture before any change, which stays the same while the panel is open:
+     /// measured once from the preview's source, again only when that changes.
+-    @ObservationIgnored private var cameraRawBrightness: (version: UInt64, value: CameraRawTables.Brightness)?
++    private var cameraRawBrightness: (version: UInt64, value: CameraRawTables.Brightness)?
+     var previewBrightness: CameraRawTables.Brightness? {
+         guard let cached = cameraRawBrightness, cached.version == previewSourceVersion else { return nil }
+         return cached.value
+@@ -529,9 +528,9 @@ final class FilterEdit {
+         cameraRawBrightness = (previewSourceVersion, value)
+     }
+     /// The settings `preparedPreview` was made with, for the automatic filters that have settings of their own.
+-    @ObservationIgnored var preparedSettings: FilterSettings?
+-    @ObservationIgnored var pending: FilterJob?
+-    @ObservationIgnored var previewTask: Task<Void, Never>?
++    var preparedSettings: FilterSettings?
++    var pending: FilterJob?
++    var previewTask: Task<Void, Never>?
+     /// Previews render from a copy no larger than this on its longest side.
+     static let previewLimit: CGFloat = 2048
+ 
+diff --git a/Compositor/Document/HueSaturation.swift b/Compositor/Document/HueSaturation.swift
+index 30e4e5a..5959268 100644
+--- a/Compositor/Document/HueSaturation.swift
++++ b/Compositor/Document/HueSaturation.swift
+@@ -1,4 +1,5 @@
+ import AppKit
++import Combine
+ import CoreImage
+ 
+ /// The six color ranges plus Master, as in Photoshop's Cmd+U.
+@@ -400,22 +401,21 @@ nonisolated enum HueSaturationFilter {
+ /// One open Hue/Saturation dialog. Previews render from a downscaled copy of the original
+ /// and are drawn straight on the canvas, so dragging stays responsive and the document is
+ /// untouched until OK.
+-@Observable
+-final class HueSaturationEdit {
++final class HueSaturationEdit: ObservableObject {
+     let layerID: UUID
+     let original: ImportedImage
+     let selection: SelectionClip?
+     let pixelToDocument: CGAffineTransform
+     /// Downscaled original used for previews, with the mapping for its own pixel grid.
+-    @ObservationIgnored let previewSource: CGImage
++    let previewSource: CGImage
+     /// An HDR layer's pixels at `previewSource`'s size: its preview is made from them, as OK makes the result.
+-    @ObservationIgnored var hdrPreviewSource: CGImage?
+-    @ObservationIgnored let previewPixelToDocument: CGAffineTransform
+-    var settings = HueSaturationSettings()
+-    var preview = true
++    var hdrPreviewSource: CGImage?
++    let previewPixelToDocument: CGAffineTransform
++    @Published var settings = HueSaturationSettings()
++    @Published var preview = true
+     /// What the canvas shows while the dialog is open; nil means the layer's own pixels.
+     /// Not observed: canvas redraws are driven by `brushRevision`.
+-    @ObservationIgnored private(set) var preparedPreview: CGImage?
++    private(set) var preparedPreview: CGImage?
+ 
+     /// Previews render at most this many pixels on the longest side: full size for anything ordinary, so the canvas
+     /// shows the real thing rather than a coarse copy stretched to fit, as a Hue/Saturation layer already does.
+diff --git a/Compositor/Document/Levels.swift b/Compositor/Document/Levels.swift
+index ae4e970..e7a4208 100644
+--- a/Compositor/Document/Levels.swift
++++ b/Compositor/Document/Levels.swift
+@@ -1,5 +1,5 @@
+ import AppKit
+-import Observation
++import Combine
+ 
+ nonisolated enum LevelsChannel: String, CaseIterable, Sendable, Codable {
+     case rgb = "RGB", red = "Red", green = "Green", blue = "Blue"
+@@ -104,8 +104,7 @@ nonisolated enum LevelsFilter {
+     }
+ }
+ 
+-@Observable
+-final class LevelsEdit {
++final class LevelsEdit: ObservableObject {
+     let layerID: UUID
+     let original: ImportedImage
+     let transform: LayerTransform
+@@ -115,16 +114,16 @@ final class LevelsEdit {
+     /// An HDR layer's pixels at `previewSource`'s size: its preview is made from them, as OK makes the result.
+     var hdrPreviewSource: CGImage?
+     let previewMapping: CGAffineTransform
+-    var sampleMode: LevelsSample?
+-    var settings = LevelsSettings()
+-    var preview = true
+-    var committing = false
+-    var histogram: [[Double]] = Array(repeating: Array(repeating: 0, count: 256), count: 4)
+-    var histogramReady = false
+-    @ObservationIgnored var preparedPreview: CGImage?
+-    @ObservationIgnored var pending: LevelsJob?
+-    @ObservationIgnored var previewTask: Task<Void, Never>?
+-    @ObservationIgnored var histogramTask: Task<Void, Never>?
++    @Published var sampleMode: LevelsSample?
++    @Published var settings = LevelsSettings()
++    @Published var preview = true
++    @Published var committing = false
++    @Published var histogram: [[Double]] = Array(repeating: Array(repeating: 0, count: 256), count: 4)
++    @Published var histogramReady = false
++    var preparedPreview: CGImage?
++    var pending: LevelsJob?
++    var previewTask: Task<Void, Never>?
++    var histogramTask: Task<Void, Never>?
+ 
+     init(layer: ImageLayer, selection: SelectionClip?) throws {
+         layerID = layer.id; original = layer.asset!; transform = layer.transform; self.selection = selection
+diff --git a/Compositor/Document/ProjectWorkspace.swift b/Compositor/Document/ProjectWorkspace.swift
+index 85ef65b..fe38a33 100644
+--- a/Compositor/Document/ProjectWorkspace.swift
++++ b/Compositor/Document/ProjectWorkspace.swift
+@@ -1,5 +1,5 @@
+ import AppKit
+-import Observation
++import Combine
+ import UniformTypeIdentifiers
+ 
+ @MainActor
+@@ -16,12 +16,18 @@ final class ProjectTab: Identifiable {
+     }
+ }
+ 
+-@MainActor @Observable
+-final class ProjectWorkspace {
+-    private(set) var tabs: [ProjectTab] = []
+-    private(set) var selectedID: UUID
+-    var isManaging = false
+-    @ObservationIgnored weak var window: NSWindow?
++@MainActor
++final class ProjectWorkspace: ObservableObject {
++    @Published private(set) var tabs: [ProjectTab] = [] { didSet { observeTabs() } }
++    @Published private(set) var selectedID: UUID
++    @Published var isManaging = false
++    weak var window: NSWindow?
++    private var tabChanges: [AnyCancellable] = []
++    private func observeTabs() {
++        tabChanges = tabs.map { tab in
++            tab.session.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }
++        }
++    }
+     var current: ProjectTab { tabs.first { $0.id == selectedID } ?? tabs[0] }
+     var canSwitch: Bool {
+         let s = current.session
+@@ -33,6 +39,7 @@ final class ProjectWorkspace {
+         first.session.skipsInitialClipboardCanvasSize = true
+         tabs = [first]; selectedID = first.id
+         first.controller.workspace = self
++        observeTabs()
+     }
+     /// A new tab's name: "Untitled" if no tab shows it, otherwise the lowest "Untitled N" free, as Finder and Safari
+     /// number them. Counting up for ever, closing the last tab made Untitled 2, then 3, and on.
+@@ -168,7 +175,7 @@ final class ProjectWorkspace {
+         defer { for (url, scoped) in files where scoped { url.stopAccessingSecurityScopedResource() } }
+         while !canSwitch {
+             if Task.isCancelled { return }
+-            try? await Task.sleep(for: .milliseconds(30))
++            try? await Task.sleep(nanoseconds: 30_000_000)
+         }
+         isManaging = true; defer { isManaging = false }
+         for url in urls {
+diff --git a/Compositor/Document/Selection.swift b/Compositor/Document/Selection.swift
+index 23d15be..945df56 100644
+--- a/Compositor/Document/Selection.swift
++++ b/Compositor/Document/Selection.swift
+@@ -239,19 +239,32 @@ extension EditorSession {
+                            : draft.kind == .ellipse ? "Elliptical Marquee" : "Rectangular Marquee")
+     }
+ 
++    private func selectionPath(_ lhs: CGPath, _ rhs: CGPath,
++                               operation: SelectionPathBoolean.Operation) -> CGPath? {
++        guard let result = SelectionPathBoolean.combine(lhs, rhs, operation: operation) else {
++            brushError = "The selection is too large to combine with the available memory. The existing selection was kept."
++            return nil
++        }
++        return result
++    }
++
+     func applySelection(_ shape: CGPath, mode: SelectionMode, name: String) {
+         guard let document, canEditSelection else { return }
+         let canvas = CGPath(rect: CGRect(origin: .zero, size: document.size), transform: nil)
+-        let clipped = shape.intersection(canvas, using: .winding)
+-        let result: CGPath
++        guard let clipped = selectionPath(shape, canvas, operation: .intersection) else { return }
++        let result: CGPath?
+         switch mode {
+         case .replace: result = clipped
+-        case .add: result = selection.map { $0.path.union(clipped, using: .winding) } ?? clipped
++        case .add:
++            if let current = selection {
++                result = selectionPath(current.path, clipped, operation: .union)
++            } else { result = clipped }
+         case .subtract:
+             // Subtracting from no selection selects nothing new, so nothing changes.
+             guard let current = selection else { return }
+-            result = current.path.subtracting(clipped, using: .winding)
++            result = selectionPath(current.path, clipped, operation: .subtract)
+         }
++        guard let result else { return }
+         setSelection(DocumentSelection(path: result, antialiased: selectionAntialiased), name: name)
+     }
+ 
+@@ -343,10 +356,12 @@ extension EditorSession {
+         guard let document, let current = selection, canModifySelection, delta != 0, abs(delta) <= 500 else { return }
+         // A band `|delta|` wide on each side of the outline, added or removed.
+         let band = current.path.copy(strokingWithWidth: abs(delta) * 2, lineCap: .round, lineJoin: .round, miterLimit: 10)
+-        let result = delta > 0
+-            ? current.path.union(band, using: .winding)
+-                .intersection(CGPath(rect: CGRect(origin: .zero, size: document.size), transform: nil), using: .winding)
+-            : current.path.subtracting(band, using: .winding)
++        guard var result = selectionPath(current.path, band, operation: delta > 0 ? .union : .subtract) else { return }
++        if delta > 0 {
++            let canvas = CGPath(rect: CGRect(origin: .zero, size: document.size), transform: nil)
++            guard let clipped = selectionPath(result, canvas, operation: .intersection) else { return }
++            result = clipped
++        }
+         setSelection(DocumentSelection(path: result, antialiased: current.antialiased, feather: current.feather), name: name)
+     }
+ 
+@@ -363,7 +378,8 @@ extension EditorSession {
+     func invertSelection() {
+         guard let document, let current = selection else { return }
+         let canvas = CGPath(rect: CGRect(origin: .zero, size: document.size), transform: nil)
+-        let inverse = DocumentSelection(path: canvas.subtracting(current.path, using: .winding), antialiased: current.antialiased,
++        guard let path = selectionPath(canvas, current.path, operation: .subtract) else { return }
++        let inverse = DocumentSelection(path: path, antialiased: current.antialiased,
+                                         feather: current.feather)
+         // The inverse of everything is no selection at all, as in Photoshop — not an invisible empty one that
+         // quietly stops every brush.
+diff --git a/Compositor/Document/SelectionPathBoolean.swift b/Compositor/Document/SelectionPathBoolean.swift
+new file mode 100644
+index 0000000..59b5b49
+--- /dev/null
++++ b/Compositor/Document/SelectionPathBoolean.swift
+@@ -0,0 +1,53 @@
++import CoreGraphics
++
++/// Monterey has no vector path Boolean operations. Trace a document-pixel mask there;
++/// keep the vector implementation on newer systems. Empty masks are explicit empty paths.
++nonisolated enum SelectionPathBoolean {
++    enum Operation { case union, intersection, subtract }
++
++    static func combine(_ lhs: CGPath, _ rhs: CGPath, operation: Operation) -> CGPath? {
++        if #available(macOS 13, *) {
++            switch operation {
++            case .union: return lhs.union(rhs, using: .winding)
++            case .intersection: return lhs.intersection(rhs, using: .winding)
++            case .subtract: return lhs.subtracting(rhs, using: .winding)
++            }
++        }
++        var bounds: CGRect
++        switch operation {
++        case .union: bounds = lhs.boundingBoxOfPath.union(rhs.boundingBoxOfPath)
++        case .intersection: bounds = lhs.boundingBoxOfPath.intersection(rhs.boundingBoxOfPath)
++        case .subtract: bounds = lhs.boundingBoxOfPath
++        }
++        if bounds.isNull || bounds.isEmpty { return CGMutablePath() }
++        bounds = bounds.integral
++        // Refuse unbounded allocations without changing the existing selection.
++        guard bounds.width.isFinite, bounds.height.isFinite,
++              bounds.width <= 131072, bounds.height <= 131072,
++              bounds.width * bounds.height <= 134217728 else { return nil }
++        let width = Int(bounds.width), height = Int(bounds.height)
++        guard let context = CGContext(data: nil, width: width, height: height,
++                                      bitsPerComponent: 8, bytesPerRow: width,
++                                      space: CGColorSpaceCreateDeviceGray(), bitmapInfo: 0) else { return nil }
++        context.translateBy(x: -bounds.minX, y: bounds.maxY)
++        context.scaleBy(x: 1, y: -1)
++        context.setShouldAntialias(false)
++        context.setFillColor(gray: 1, alpha: 1)
++        switch operation {
++        case .union:
++            context.addPath(lhs); context.fillPath()
++            context.addPath(rhs); context.fillPath()
++        case .intersection:
++            context.addPath(lhs); context.clip()
++            context.addPath(rhs); context.fillPath()
++        case .subtract:
++            context.addPath(lhs); context.fillPath()
++            context.setFillColor(gray: 0, alpha: 1)
++            context.addPath(rhs); context.fillPath()
++        }
++        guard let image = context.makeImage() else { return nil }
++        guard let outline = MaskTracing.whitePixels(in: image) else { return CGMutablePath() }
++        var translation = CGAffineTransform(translationX: bounds.minX, y: bounds.minY)
++        return outline.copy(using: &translation)
++    }
++}
+diff --git a/Compositor/Document/SubjectRemoval.swift b/Compositor/Document/SubjectRemoval.swift
+index 09f8ad7..b03cca7 100644
+--- a/Compositor/Document/SubjectRemoval.swift
++++ b/Compositor/Document/SubjectRemoval.swift
+@@ -4,8 +4,13 @@ import CoreImage
+ 
+ nonisolated enum SubjectRemoval {
+     enum Failure: LocalizedError {
+-        case noSubject
+-        var errorDescription: String? { "No foreground subject was detected in this layer. Try an image with a more distinct subject." }
++        case noSubject, unsupported
++        var errorDescription: String? {
++            switch self {
++            case .noSubject: return "No foreground subject was detected in this layer. Try an image with a more distinct subject."
++            case .unsupported: return "Automatic background removal requires macOS 14 or later. Use a layer mask or a manual selection on this Mac."
++            }
++        }
+     }
+     /// Vision's own mask for an image, kept while the panel is open so moving a slider only redoes the refining.
+     private static let cache = MaskCache()
+@@ -27,7 +32,8 @@ nonisolated enum SubjectRemoval {
+     /// Vision's raw subject mask, white over the subject: the model has no settings of its own, so everything the
+     /// panel offers is done to this afterwards by `refined`.
+     private static func vision(_ image: CGImage) throws -> CGImage {
+-        try cache.mask(for: image) {
++        guard #available(macOS 14.0, *) else { throw Failure.unsupported }
++        return try cache.mask(for: image) {
+             let handler = VNImageRequestHandler(cgImage: image, orientation: .up)
+             let request = VNGenerateForegroundInstanceMaskRequest()
+             try handler.perform([request])
+diff --git a/Compositor/IO/CompositorApplicationDelegate.swift b/Compositor/IO/CompositorApplicationDelegate.swift
+index 3ce7c4d..41047ff 100644
+--- a/Compositor/IO/CompositorApplicationDelegate.swift
++++ b/Compositor/IO/CompositorApplicationDelegate.swift
+@@ -1,8 +1,18 @@
+ import AppKit
+ import Sparkle
++import Combine
+ 
+-final class CompositorApplicationDelegate: NSObject, NSApplicationDelegate {
++final class CompositorApplicationDelegate: NSObject, NSApplicationDelegate, ObservableObject {
+     let workspace = ProjectWorkspace()
++    private var changes: [AnyCancellable] = []
++
++    override init() {
++        super.init()
++        changes = [workspace.objectWillChange, RecentProjects.shared.objectWillChange,
++                   ShortcutSettings.shared.objectWillChange].map { publisher in
++            publisher.sink { [weak self] _ in self?.objectWillChange.send() }
++        }
++    }
+     var session: EditorSession { workspace.current.session }
+     var projects: ProjectController { workspace.current.controller }
+     var showEditor: (() -> Void)?
+@@ -26,11 +36,12 @@ final class CompositorApplicationDelegate: NSObject, NSApplicationDelegate {
+             // appears. A Dock click's reopen event makes the window, so the app sends itself one once launched.
+             else { DispatchQueue.main.async { Self.reopen() } }
+         }
+-        application.activate()
++        if #available(macOS 14.0, *) { application.activate() }
++        else { application.activate(ignoringOtherApps: true) }
+         Task { await workspace.receive(urls) }
+     }
+ 
+-    private static func reopen() {
++    static func reopen() {
+         let event = NSAppleEventDescriptor(eventClass: AEEventClass(kCoreEventClass), eventID: AEEventID(kAEReopenApplication),
+                                            targetDescriptor: .currentProcess(), returnID: AEReturnID(kAutoGenerateReturnID),
+                                            transactionID: AETransactionID(kAnyTransactionID))
+diff --git a/Compositor/IO/ProjectController+ExternalChanges.swift b/Compositor/IO/ProjectController+ExternalChanges.swift
+index 1e55d24..4951a88 100644
+--- a/Compositor/IO/ProjectController+ExternalChanges.swift
++++ b/Compositor/IO/ProjectController+ExternalChanges.swift
+@@ -66,7 +66,7 @@ extension ProjectController {
+         let attempt = externalChanges.recheckAttempt
+         externalChanges.recheckAttempt = min(attempt + 1, 7)
+         externalChanges.recheck = Task { @MainActor [weak self] in
+-            try? await Task.sleep(for: .milliseconds(250 * (1 << attempt)))
++            try? await Task.sleep(nanoseconds: UInt64(250 * (1 << attempt)) * 1_000_000)
+             guard let self, !Task.isCancelled else { return }
+             self.noteExternalChange()
+         }
+diff --git a/Compositor/IO/ProjectWatcher.swift b/Compositor/IO/ProjectWatcher.swift
+index cf5efb4..a892741 100644
+--- a/Compositor/IO/ProjectWatcher.swift
++++ b/Compositor/IO/ProjectWatcher.swift
+@@ -15,7 +15,7 @@ final class ProjectWatcher {
+     private var delivery: Task<Void, Never>?
+     private var rearm: Task<Void, Never>?
+     /// How long to wait after the last event before reporting, so a save that touches several files reports once.
+-    static let coalescing: Duration = .milliseconds(300)
++    static let coalescing: UInt64 = 300_000_000 // Nanoseconds.
+ 
+     init(url: URL, onChange: @escaping @MainActor () -> Void) {
+         self.url = url
+@@ -69,7 +69,7 @@ final class ProjectWatcher {
+         rearm?.cancel()
+         rearm = Task { @MainActor [weak self] in
+             for _ in 0..<20 {
+-                try? await Task.sleep(for: .milliseconds(100))
++                try? await Task.sleep(nanoseconds: 100_000_000)
+                 guard let self, !Task.isCancelled else { return }
+                 self.arm()
+                 if self.sources.count == self.watchedPaths.count { return }
+@@ -77,7 +77,7 @@ final class ProjectWatcher {
+         }
+         delivery?.cancel()
+         delivery = Task { @MainActor [weak self] in
+-            try? await Task.sleep(for: Self.coalescing)
++            try? await Task.sleep(nanoseconds: Self.coalescing)
+             guard let self, !Task.isCancelled else { return }
+             self.onChange()
+         }
+diff --git a/Compositor/IO/RawImporter.swift b/Compositor/IO/RawImporter.swift
+index c9351a0..acef0df 100644
+--- a/Compositor/IO/RawImporter.swift
++++ b/Compositor/IO/RawImporter.swift
+@@ -106,15 +106,15 @@ nonisolated enum RawImporter {
+         var settings = RawDevelopSettings(temperature: filter.neutralTemperature, tint: filter.neutralTint)
+         settings.noiseReduction = filter.isLuminanceNoiseReductionSupported ? filter.luminanceNoiseReductionAmount : 0
+         settings.lensCorrection = filter.isLensCorrectionSupported && filter.isLensCorrectionEnabled
+-        settings.highlightRecovery = filter.isHighlightRecoverySupported && filter.isHighlightRecoveryEnabled
++        if #available(macOS 26, *) { settings.highlightRecovery = filter.isHighlightRecoverySupported && filter.isHighlightRecoveryEnabled }
+         settings.asShotTemperature = settings.temperature
+         settings.asShotTint = settings.tint
+         settings.asShotNoiseReduction = settings.noiseReduction
+         settings.asShotLensCorrection = settings.lensCorrection
+-        settings.asShotHighlightRecovery = settings.highlightRecovery
++        if #available(macOS 26, *) { settings.asShotHighlightRecovery = settings.highlightRecovery }
+         settings.supportsNoiseReduction = filter.isLuminanceNoiseReductionSupported
+         settings.supportsLensCorrection = filter.isLensCorrectionSupported
+-        settings.supportsHighlightRecovery = filter.isHighlightRecoverySupported
++        if #available(macOS 26, *) { settings.supportsHighlightRecovery = filter.isHighlightRecoverySupported }
+         return settings
+     }
+ 
+@@ -142,7 +142,7 @@ nonisolated enum RawImporter {
+         filter.boostAmount = settings.boost
+         if settings.supportsNoiseReduction { filter.luminanceNoiseReductionAmount = settings.noiseReduction }
+         if settings.supportsLensCorrection { filter.isLensCorrectionEnabled = settings.lensCorrection }
+-        if settings.supportsHighlightRecovery { filter.isHighlightRecoveryEnabled = settings.highlightRecovery }
++        if settings.supportsHighlightRecovery { if #available(macOS 26, *) { filter.isHighlightRecoveryEnabled = settings.highlightRecovery } }
+         guard let output = filter.outputImage else { return nil }
+         if sixteenBit {
+             return context.createCGImage(output, from: output.extent.integral, format: .RGBA16,
+diff --git a/Compositor/IO/RecentProjects.swift b/Compositor/IO/RecentProjects.swift
+index 48b9e7e..ddf172f 100644
+--- a/Compositor/IO/RecentProjects.swift
++++ b/Compositor/IO/RecentProjects.swift
+@@ -1,14 +1,14 @@
+ import AppKit
+-import Observation
++import Combine
+ 
+ /// File > Open Recent. macOS keeps the list (the same one the Dock icon's menu shows); this mirrors it so the
+ /// menu updates as projects are opened and saved. Projects since moved or deleted are left out, checked again each
+ /// time you come back to the app (from Finder, say).
+-@MainActor @Observable
+-final class RecentProjects {
++@MainActor
++final class RecentProjects: ObservableObject {
+     static let shared = RecentProjects()
+-    private(set) var urls: [URL] = []
+-    @ObservationIgnored private var activation: NSObjectProtocol?
++    @Published private(set) var urls: [URL] = []
++    private var activation: NSObjectProtocol?
+     private init() {
+         refresh()
+         activation = NotificationCenter.default.addObserver(forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main) { _ in
+diff --git a/Compositor/IO/UpdateDriver.swift b/Compositor/IO/UpdateDriver.swift
+index 7532bb2..5d27620 100644
+--- a/Compositor/IO/UpdateDriver.swift
++++ b/Compositor/IO/UpdateDriver.swift
+@@ -38,7 +38,8 @@ import Sparkle
+         alert.layout()
+         Self.trimAccessory(alert)
+         Self.alignIconWithTitle(alert)
+-        NSApp.activate()
++        if #available(macOS 14.0, *) { NSApp.activate() }
++        else { NSApp.activate(ignoringOtherApps: true) }
+         // After Sparkle's call returns, so its updater isn't held up inside a modal run loop.
+         DispatchQueue.main.async { [weak self] in
+             let response = alert.runModal()
+diff --git a/Compositor/Rendering/EditorCanvas.swift b/Compositor/Rendering/EditorCanvas.swift
+index a5e249e..6167534 100644
+--- a/Compositor/Rendering/EditorCanvas.swift
++++ b/Compositor/Rendering/EditorCanvas.swift
+@@ -2,7 +2,7 @@ import AppKit
+ import SwiftUI
+ 
+ struct EditorCanvas: NSViewRepresentable {
+-    let session: EditorSession
++    @ObservedObject var session: EditorSession
+     func makeNSView(context: Context) -> CanvasView { CanvasView(session: session) }
+     func updateNSView(_ view: CanvasView, context: Context) {
+         view.consumeFocusRequest(session.canvasFocusRequest)
+@@ -1482,11 +1482,18 @@ final class CanvasView: NSView {
+         }
+         addCursorRect(bounds, cursor: toolCursor)
+         guard session.tool == .crop, !spaceHeld else { return }
+-        let positions: [NSCursor.FrameResizePosition] = [.topLeft, .top, .topRight, .right, .bottomRight, .bottom, .bottomLeft, .left]
+         for region in transformOverlay.cropResizeRegions.reversed() {
+             let rect = region.rect.intersection(bounds)
+             if !rect.isEmpty && !rect.isNull {
+-                addCursorRect(rect, cursor: .frameResize(position: positions[region.index], directions: [.inward, .outward]))
++                let cursor: NSCursor
++                if #available(macOS 15.0, *) {
++                    let positions: [NSCursor.FrameResizePosition] = [.topLeft, .top, .topRight, .right, .bottomRight, .bottom, .bottomLeft, .left]
++                    cursor = .frameResize(position: positions[region.index], directions: [.inward, .outward])
++                } else {
++                    let direction = region.index % 4
++                    cursor = direction == 1 ? .resizeUpDown : direction == 3 ? .resizeLeftRight : .crosshair
++                }
++                addCursorRect(rect, cursor: cursor)
+             }
+         }
+     }
+diff --git a/Compositor/Rendering/InlineTextEditor.swift b/Compositor/Rendering/InlineTextEditor.swift
+index db80446..3dd0426 100644
+--- a/Compositor/Rendering/InlineTextEditor.swift
++++ b/Compositor/Rendering/InlineTextEditor.swift
+@@ -372,12 +372,14 @@ final class InlineTextEditor: NSView, NSTextViewDelegate {
+ 
+     /// The arrows for the edge or corner a handle resizes, turned with the text box.
+     private func handleCursor(_ index: Int) -> NSCursor {
+-        let positions: [NSCursor.FrameResizePosition] = [.topLeft, .top, .topRight, .right, .topLeft, .top, .topRight, .right]
+         let rotation = canvas?.session.textDraft?.transform?.rotation ?? 0
+         let turns = (Int((rotation / 45).rounded()) % 8 + 8) % 8
+-        let ordered: [NSCursor.FrameResizePosition] = [.topLeft, .top, .topRight, .right]
+-        let position = ordered[(ordered.firstIndex(of: positions[index])! + turns) % 4]
+-        return .frameResize(position: position, directions: [.inward, .outward])
++        let direction = (index + turns) % 4
++        if #available(macOS 15.0, *) {
++            let ordered: [NSCursor.FrameResizePosition] = [.topLeft, .top, .topRight, .right]
++            return .frameResize(position: ordered[direction], directions: [.inward, .outward])
++        }
++        return direction == 1 ? .resizeUpDown : direction == 3 ? .resizeLeftRight : .crosshair
+     }
+ 
+     /// How far either side of an edge counts as that edge, in the box's own units. Capped so a small box keeps a
+diff --git a/Compositor/Rendering/TiledLayerRenderer.swift b/Compositor/Rendering/TiledLayerRenderer.swift
+index 7c1572e..1414521 100644
+--- a/Compositor/Rendering/TiledLayerRenderer.swift
++++ b/Compositor/Rendering/TiledLayerRenderer.swift
+@@ -168,8 +168,14 @@ nonisolated enum TiledLayerRenderer {
+         context.saveGState()
+         context.setShouldAntialias(false)
+         let outline = CGPath(rect: visible.insetBy(dx: -64, dy: -64), transform: nil)
+-        context.addPath(outline.subtracting(CGPath(rect: device.insetBy(dx: -0.001, dy: -0.001), transform: [toUser]), using: .winding))
++        context.addPath(outline)
+         context.clip()
++        // Intersect with the complement in device space, preserving fractional edges.
++        let complement = CGMutablePath()
++        complement.addRect(visible.applying(toDevice).union(device).insetBy(dx: -128, dy: -128))
++        complement.addRect(device.insetBy(dx: -0.001, dy: -0.001))
++        context.addPath(complement.copy(using: [toUser])!)
++        context.clip(using: .evenOdd)
+         unchanged()
+         context.restoreGState()
+ 
+@@ -259,10 +265,17 @@ nonisolated enum TiledLayerRenderer {
+     private static func clip(to area: CGRect, excluding holes: [CGRect], frame: Frame, in context: CGContext) {
+         context.setShouldAntialias(false)
+         let outline = CGPath(rect: snapped(frame.mapped(area), in: context), transform: nil)
+-        let cut = CGMutablePath()
+-        for hole in holes where hole.intersects(area) { cut.addRect(snapped(frame.mapped(hole), in: context)) }
+-        context.addPath(cut.isEmpty ? outline : outline.subtracting(cut, using: .winding))
++        context.addPath(outline)
+         context.clip()
++        // Separate complement clips subtract the union, including overlapping holes.
++        for hole in holes where hole.intersects(area) {
++            let cut = CGMutablePath()
++            let rect = snapped(frame.mapped(hole), in: context)
++            cut.addRect(outline.boundingBoxOfPath.union(rect).insetBy(dx: -1, dy: -1))
++            cut.addRect(rect)
++            context.addPath(cut)
++            context.clip(using: .evenOdd)
++        }
+     }
+ 
+     /// A clip edge on a fraction of a screen pixel leaves that pixel to be rounded one way here and the other way in
+diff --git a/Compositor/Rendering/TransformOverlay.swift b/Compositor/Rendering/TransformOverlay.swift
+index 324f3a4..b12b719 100644
+--- a/Compositor/Rendering/TransformOverlay.swift
++++ b/Compositor/Rendering/TransformOverlay.swift
+@@ -44,8 +44,11 @@ struct TransformOverlayGeometry: Equatable {
+         let angle = atan2(handles[2].y - handles[0].y, handles[2].x - handles[0].x)
+         let offsets: [CGFloat] = [.pi / 4, .pi / 2, 3 * .pi / 4, 0, .pi / 4, .pi / 2, 3 * .pi / 4, 0]
+         let direction = (Int(((angle + offsets[index]) / (.pi / 4)).rounded()) % 4 + 4) % 4
+-        let positions: [NSCursor.FrameResizePosition] = [.right, .bottomRight, .bottom, .topRight]
+-        return .frameResize(position: positions[direction], directions: [.inward, .outward])
++        if #available(macOS 15.0, *) {
++            let positions: [NSCursor.FrameResizePosition] = [.right, .bottomRight, .bottom, .topRight]
++            return .frameResize(position: positions[direction], directions: [.inward, .outward])
++        }
++        return direction == 0 ? .resizeLeftRight : direction == 2 ? .resizeUpDown : .crosshair
+     }
+ }
+ 
+diff --git a/Compositor/UI/BlendModePicker.swift b/Compositor/UI/BlendModePicker.swift
+index 28aa753..7af25a5 100644
+--- a/Compositor/UI/BlendModePicker.swift
++++ b/Compositor/UI/BlendModePicker.swift
+@@ -2,7 +2,7 @@ import SwiftUI
+ import AppKit
+ 
+ struct BlendModePicker: NSViewRepresentable {
+-    let session: EditorSession
++    @ObservedObject var session: EditorSession
+     func makeCoordinator() -> Coordinator { Coordinator(session: session) }
+     func makeNSView(context: Context) -> NSPopUpButton {
+         let button = NSPopUpButton(frame: .zero, pullsDown: false)
+@@ -20,11 +20,13 @@ struct BlendModePicker: NSViewRepresentable {
+         button.action = #selector(Coordinator.choose(_:))
+         button.setAccessibilityLabel("Blend mode".localized)
+         // A capsule like the SwiftUI buttons and menus (`roundedControls`), which don't reach this AppKit pop-up.
+-        button.borderShape = .capsule
++        button.bezelStyle = .rounded
+         return button
+     }
+     /// As wide as it's offered. Left to itself, the pop-up insists on the width of its longest mode, wider than a
+     /// narrow Layers panel has room for, and that pushed the whole panel out past its edges.
++    /// macOS 13+ sizes it; on macOS 12 the pop-up keeps its intrinsic width.
++    @available(macOS 13.0, *)
+     func sizeThatFits(_ proposal: ProposedViewSize, nsView button: NSPopUpButton, context: Context) -> CGSize? {
+         let natural = button.intrinsicContentSize
+         guard let width = proposal.width, width.isFinite else { return natural }
+diff --git a/Compositor/UI/BrushControls.swift b/Compositor/UI/BrushControls.swift
+index 8453f76..7252522 100644
+--- a/Compositor/UI/BrushControls.swift
++++ b/Compositor/UI/BrushControls.swift
+@@ -1,7 +1,7 @@
+ import SwiftUI
+ 
+ struct BrushControls: View {
+-    @Bindable var session: EditorSession
++    @ObservedObject var session: EditorSession
+     var body: some View {
+         HStack(spacing: 12) {
+             Text(session.tool == .spotHealing ? "Spot Healing".localized : session.tool == .cloneStamp ? "Clone Stamp".localized : session.tool == .blur ? "Smear".localized : session.brushMode == .erase ? "Eraser".localized : "Brush".localized).font(ToolHeaderStyle.titleFont)
+diff --git a/Compositor/UI/CameraRawColorControls.swift b/Compositor/UI/CameraRawColorControls.swift
+index 8fc4e05..fe64abc 100644
+--- a/Compositor/UI/CameraRawColorControls.swift
++++ b/Compositor/UI/CameraRawColorControls.swift
+@@ -1,7 +1,7 @@
+ import SwiftUI
+ 
+ struct CameraRawCurveControls: View {
+-    @Bindable var session: EditorSession
++    @ObservedObject var session: EditorSession
+     private var raw: CameraRawSettings { session.filterEdit?.settings.cameraRaw ?? CameraRawSettings() }
+     private var edit: FilterEdit? { session.filterEdit }
+     /// What a drag in the graph is moving, picked when it starts and kept until it ends, as Image › Curves does: a
+@@ -9,6 +9,7 @@ struct CameraRawCurveControls: View {
+     private enum Drag { case point(Int), divider(Int), region(WritableKeyPath<CameraRawCurveSettings, Double>, Double) }
+     @State private var drag: Drag?
+     @State private var selected: Int?
++    @State private var clickLocation = CGPoint.zero
+ 
+     var body: some View {
+         VStack(alignment: .leading, spacing: 8) {
+@@ -92,14 +93,15 @@ struct CameraRawCurveControls: View {
+             // nothing could be dragged, and picking the nearest point afresh at every step jumped between points.
+             .gesture(DragGesture(minimumDistance: 0)
+                 .onChanged { value in
++                    clickLocation = value.startLocation
+                     if drag == nil { drag = edit?.cameraRawCurvePage == .parametric ? parametricDrag(at: value.startLocation, in: size)
+                                                                                      : pointDrag(at: value.startLocation, in: size) }
+                     continueDrag(value, in: size)
+                 }
+                 .onEnded { _ in drag = nil })
+-            .simultaneousGesture(SpatialTapGesture(count: 2).onEnded { value in
++            .simultaneousGesture(TapGesture(count: 2).onEnded {
+                 guard edit?.cameraRawCurvePage == .point else { return }
+-                removePoint(at: value.location, in: size)
++                removePoint(at: clickLocation, in: size)
+             })
+         }
+         .background(Color.black.opacity(0.35))
+@@ -260,7 +262,7 @@ private enum CurvePreset: Hashable {
+ }
+ 
+ struct CameraRawMixerControls: View {
+-    @Bindable var session: EditorSession
++    @ObservedObject var session: EditorSession
+     private var raw: CameraRawSettings { session.filterEdit?.settings.cameraRaw ?? CameraRawSettings() }
+     private var edit: FilterEdit? { session.filterEdit }
+     /// What a drag in the graph is moving, picked when it starts and kept until it ends, as Image › Curves does: a
+@@ -424,7 +426,7 @@ struct CameraRawMixerControls: View {
+ }
+ 
+ struct CameraRawGradingControls: View {
+-    @Bindable var session: EditorSession
++    @ObservedObject var session: EditorSession
+     private var raw: CameraRawSettings { session.filterEdit?.settings.cameraRaw ?? CameraRawSettings() }
+     private var page: CameraRawGradePage { session.filterEdit?.cameraRawGradePage ?? .threeWay }
+ 
+diff --git a/Compositor/UI/CameraRawControls.swift b/Compositor/UI/CameraRawControls.swift
+index b22649b..87c8b4e 100644
+--- a/Compositor/UI/CameraRawControls.swift
++++ b/Compositor/UI/CameraRawControls.swift
+@@ -4,7 +4,7 @@ import SwiftUI
+ /// Camera Raw Filter's adjustment column: the histogram, then Light, Color, Color Grading, Effects, Curve,
+ /// Color Mixer, Detail, Optics, Geometry, and Calibration.
+ struct CameraRawControls: View {
+-    @Bindable var session: EditorSession
++    @ObservedObject var session: EditorSession
+     @State private var expanded: Set<Section> = [.light, .color, .colorGrading]
+     @State private var optionMonitor: Any?
+ 
+diff --git a/Compositor/UI/CameraRawDetailOpticsControls.swift b/Compositor/UI/CameraRawDetailOpticsControls.swift
+index 442741d..ffea84c 100644
+--- a/Compositor/UI/CameraRawDetailOpticsControls.swift
++++ b/Compositor/UI/CameraRawDetailOpticsControls.swift
+@@ -2,7 +2,7 @@ import AppKit
+ import SwiftUI
+ 
+ struct CameraRawDetailControls: View {
+-    @Bindable var session: EditorSession
++    @ObservedObject var session: EditorSession
+     private var settings: FilterSettings { session.filterEdit?.settings ?? FilterSettings() }
+     private var raw: CameraRawSettings { settings.cameraRaw }
+ 
+@@ -84,7 +84,7 @@ struct CameraRawDetailControls: View {
+ }
+ 
+ struct CameraRawOpticsControls: View {
+-    @Bindable var session: EditorSession
++    @ObservedObject var session: EditorSession
+     private var settings: FilterSettings { session.filterEdit?.settings ?? FilterSettings() }
+     private var raw: CameraRawSettings { settings.cameraRaw }
+ 
+diff --git a/Compositor/UI/CameraRawGeometryCalibrationControls.swift b/Compositor/UI/CameraRawGeometryCalibrationControls.swift
+index 2f2869d..38245ff 100644
+--- a/Compositor/UI/CameraRawGeometryCalibrationControls.swift
++++ b/Compositor/UI/CameraRawGeometryCalibrationControls.swift
+@@ -2,7 +2,7 @@ import AppKit
+ import SwiftUI
+ 
+ struct CameraRawGeometryControls: View {
+-    @Bindable var session: EditorSession
++    @ObservedObject var session: EditorSession
+     private var settings: FilterSettings { session.filterEdit?.settings ?? FilterSettings() }
+     private var raw: CameraRawSettings { settings.cameraRaw }
+ 
+@@ -88,7 +88,7 @@ struct CameraRawGeometryControls: View {
+ }
+ 
+ struct CameraRawCalibrationControls: View {
+-    @Bindable var session: EditorSession
++    @ObservedObject var session: EditorSession
+     private var settings: FilterSettings { session.filterEdit?.settings ?? FilterSettings() }
+     private var raw: CameraRawSettings { settings.cameraRaw }
+ 
+diff --git a/Compositor/UI/CameraRawSlider.swift b/Compositor/UI/CameraRawSlider.swift
+index 370253c..c81484a 100644
+--- a/Compositor/UI/CameraRawSlider.swift
++++ b/Compositor/UI/CameraRawSlider.swift
+@@ -86,6 +86,7 @@ struct CameraRawSlider: NSViewRepresentable {
+         return slider
+     }
+ 
++    @available(macOS 13, *)
+     func sizeThatFits(_ proposal: ProposedViewSize, nsView: CameraRawSliderView, context: Context) -> CGSize? {
+         CGSize(width: proposal.width ?? 120, height: 22)
+     }
+@@ -123,6 +124,7 @@ struct CameraRawSlider: NSViewRepresentable {
+ }
+ 
+ final class CameraRawSliderView: NSSlider {
++    override var intrinsicContentSize: NSSize { NSSize(width: 120, height: 22) }
+     var onReset: (() -> Void)?
+     var onTrackClick: ((Double) -> Void)?
+     /// True while a press is being tracked, so a binding update does not fight the drag.
+diff --git a/Compositor/UI/CanvasRulers.swift b/Compositor/UI/CanvasRulers.swift
+index ccb5c10..9c18ec0 100644
+--- a/Compositor/UI/CanvasRulers.swift
++++ b/Compositor/UI/CanvasRulers.swift
+@@ -21,7 +21,7 @@ struct CanvasRulerCorner: View {
+ }
+ 
+ struct CanvasRulerView: NSViewRepresentable {
+-    let session: EditorSession
++    @ObservedObject var session: EditorSession
+     let axis: CanvasGuide.Axis
+ 
+     func makeNSView(context: Context) -> CanvasRulerNSView {
+diff --git a/Compositor/UI/CanvasSizeSheet.swift b/Compositor/UI/CanvasSizeSheet.swift
+index 4f88c14..6604ac4 100644
+--- a/Compositor/UI/CanvasSizeSheet.swift
++++ b/Compositor/UI/CanvasSizeSheet.swift
+@@ -3,7 +3,7 @@ import SwiftUI
+ struct CanvasSizeSheet: View {
+     let foreground: PaletteColor
+     let background: PaletteColor
+-    let session: EditorSession
++    @ObservedObject var session: EditorSession
+     let finish: (CanvasSizeOptions?) -> Void
+     @State private var draft: CanvasSizeDraft
+     @State private var anchor = 4
+diff --git a/Compositor/UI/ColorPaletteControls.swift b/Compositor/UI/ColorPaletteControls.swift
+index a92461a..7fe29e3 100644
+--- a/Compositor/UI/ColorPaletteControls.swift
++++ b/Compositor/UI/ColorPaletteControls.swift
+@@ -2,7 +2,7 @@ import SwiftUI
+ import AppKit
+ 
+ struct ColorPaletteControls: View {
+-    let session: EditorSession
++    @ObservedObject var session: EditorSession
+     @State private var choosingMaskBackground: Bool?
+     @State private var pickerPanel = ColorPickerPanelController()
+     private let swatchSize: CGFloat = 24
+diff --git a/Compositor/UI/ColorPickerSheet.swift b/Compositor/UI/ColorPickerSheet.swift
+index 2d3d7d7..84ed5a2 100644
+--- a/Compositor/UI/ColorPickerSheet.swift
++++ b/Compositor/UI/ColorPickerSheet.swift
+@@ -5,7 +5,7 @@ import AppKit
+ /// new/current preview, RGB and hex entry. Lives in a movable floating panel so
+ /// the canvas stays visible and can be clicked to sample a color.
+ struct ColorPickerSheet: View {
+-    @Bindable var state: ColorPickerState
++    @ObservedObject var state: ColorPickerState
+     let finish: (Bool) -> Void
+     @State private var hexDraft = ""
+     @FocusState private var hexFocused: Bool
+@@ -194,7 +194,7 @@ final class ColorPickerPanelController: NSObject {
+ struct DialogColorSwatch: View {
+     let title: String
+     @Binding var color: PaletteColor
+-    let session: EditorSession
++    @ObservedObject var session: EditorSession
+     var body: some View {
+         Button {
+             session.openDialogColorPicker(title: title, color: color) { color = $0 }
+diff --git a/Compositor/UI/ColorRangeSheet.swift b/Compositor/UI/ColorRangeSheet.swift
+index 9942994..a4bba77 100644
+--- a/Compositor/UI/ColorRangeSheet.swift
++++ b/Compositor/UI/ColorRangeSheet.swift
+@@ -2,7 +2,7 @@ import SwiftUI
+ 
+ /// Select > Color Range's panel: the eyedroppers, Fuzziness and Invert, with the selection updating on the canvas.
+ struct ColorRangeSheet: View {
+-    @Bindable var session: EditorSession
++    @ObservedObject var session: EditorSession
+     private var edit: ColorRangeEdit? { session.colorRange }
+ 
+     var body: some View {
+diff --git a/Compositor/UI/CommandPalette.swift b/Compositor/UI/CommandPalette.swift
+index 5097948..a458355 100644
+--- a/Compositor/UI/CommandPalette.swift
++++ b/Compositor/UI/CommandPalette.swift
+@@ -1,4 +1,5 @@
+ import AppKit
++import Combine
+ 
+ /// One thing the command palette can run: a menu command or a tool.
+ struct CommandPaletteEntry: Identifiable {
+@@ -228,13 +229,13 @@ extension CommandPaletteEntry {
+ }
+ 
+ /// What the palette shows: the query, the ranked results and which one is chosen.
+-@MainActor @Observable
+-final class CommandPaletteModel {
++@MainActor
++final class CommandPaletteModel: ObservableObject {
+     let entries: [CommandPaletteEntry]
+     // Only a real change goes back to the top: pressing Return writes the same text back, which used to move the
+     // choice to the first row just before it ran.
+-    var query = "" { didSet { if query != oldValue { selection = 0 } } }
+-    var selection = 0
++    @Published var query = "" { didSet { if query != oldValue { selection = 0 } } }
++    @Published var selection = 0
+ 
+     init(entries: [CommandPaletteEntry]) { self.entries = entries }
+ 
+diff --git a/Compositor/UI/CommandPaletteView.swift b/Compositor/UI/CommandPaletteView.swift
+index 74e733b..fbccaf5 100644
+--- a/Compositor/UI/CommandPaletteView.swift
++++ b/Compositor/UI/CommandPaletteView.swift
+@@ -3,7 +3,7 @@ import SwiftUI
+ 
+ /// The palette: a search field over the ranked commands. ↑/↓ choose, Return runs, Esc closes.
+ struct CommandPaletteView: View {
+-    @Bindable var model: CommandPaletteModel
++    @ObservedObject var model: CommandPaletteModel
+     let run: (CommandPaletteEntry) -> Void
+     let close: () -> Void
+     @FocusState private var searching: Bool
+@@ -14,8 +14,10 @@ struct CommandPaletteView: View {
+                 .textFieldStyle(.plain).font(.system(size: 17))
+                 .padding(.horizontal, 16).padding(.vertical, 13)
+                 .focused($searching)
+-                .onKeyPress(.upArrow) { model.move(by: -1); return .handled }
+-                .onKeyPress(.downArrow) { model.move(by: 1); return .handled }
++                .onMoveCommand { direction in
++                    if direction == .up { model.move(by: -1) }
++                    if direction == .down { model.move(by: 1) }
++                }
+                 .onSubmit { if let entry = model.selected { run(entry) } }
+                 .onExitCommand(perform: close)
+             Divider()
+@@ -88,10 +90,11 @@ final class CommandPaletteController {
+             + CommandPaletteEntry.tools(for: session)
+         let model = CommandPaletteModel(entries: entries)
+         let panel = self.panel ?? makePanel()
+-        let host = NSHostingView(rootView: CommandPaletteView(model: model, run: { [weak self] in self?.run($0) },
+-                                                             close: { [weak self] in self?.close() }))
++        let host = PanelHostingView(rootView: AnyView(CommandPaletteView(model: model, run: { [weak self] in self?.run($0) },
++                                                                        close: { [weak self] in self?.close() })))
+         // The panel keeps the size given below rather than growing to what SwiftUI would like.
+-        host.sizingOptions = []
++        host.sizesToContent = false
++        if #available(macOS 13, *) { host.sizingOptions = [] }
+         host.frame = NSRect(x: 0, y: 0, width: 460, height: 290)
+         panel.contentView = host
+         panel.setContentSize(NSSize(width: 460, height: 290))
+diff --git a/Compositor/UI/CropControls.swift b/Compositor/UI/CropControls.swift
+index 41668c8..41af38a 100644
+--- a/Compositor/UI/CropControls.swift
++++ b/Compositor/UI/CropControls.swift
+@@ -3,7 +3,7 @@ import SwiftUI
+ /// The Crop tool's header. A view of its own because dragging the crop frame changes `cropRect` on
+ /// every mouse move: read here, only this bar re-renders, not the whole editor and its Layers panel.
+ struct CropControls: View {
+-    @Bindable var session: EditorSession
++    @ObservedObject var session: EditorSession
+ 
+     var body: some View {
+         HStack(spacing: 14) {
+diff --git a/Compositor/UI/EffectsSheet.swift b/Compositor/UI/EffectsSheet.swift
+index 50c8c57..bea8365 100644
+--- a/Compositor/UI/EffectsSheet.swift
++++ b/Compositor/UI/EffectsSheet.swift
+@@ -2,7 +2,7 @@ import SwiftUI
+ 
+ /// One effect's controls, bound to the layer that opened the panel. Changes preview on the canvas.
+ struct EffectsSheet: View {
+-    @Bindable var session: EditorSession
++    @ObservedObject var session: EditorSession
+     let kind: LayerEffectKind
+ 
+     var body: some View {
+diff --git a/Compositor/UI/ExportAsSheet.swift b/Compositor/UI/ExportAsSheet.swift
+index 74176d7..a51bf65 100644
+--- a/Compositor/UI/ExportAsSheet.swift
++++ b/Compositor/UI/ExportAsSheet.swift
+@@ -11,7 +11,7 @@ struct ExportAsSheet: View {
+     /// format offered that keeps light brighter than white. Without one, EXR isn't offered.
+     let hdrRaster: ExportRaster?
+     private var formats: [ExportFormat] { ExportFormat.allCases.filter { $0 != .exr || hdrRaster != nil } }
+-    let session: EditorSession
++    @ObservedObject var session: EditorSession
+     let finish: ((data: Data, format: ExportFormat)?) -> Void
+     @State private var format: ExportFormat
+     @State private var options: JPEGOptions
+@@ -207,7 +207,7 @@ struct ExportAsSheet: View {
+             let requested = settings
+             error = nil
+             do {
+-                try await Task.sleep(for: .milliseconds(200))
++                try await Task.sleep(nanoseconds: 200_000_000)
+                 let source = requested.format == .exr ? hdrRaster ?? raster : requested.sixteenBit ? deepRaster ?? raster : raster
+                 let sized = try await ImageExporter.shared.resized(source, width: requested.width, height: requested.height)
+                 let data: Data, preview: CGImage
+@@ -246,7 +246,7 @@ struct ExportAsSheet: View {
+             Toggle("RGB".localized, isOn: Binding(get: { !cmyk }, set: { if $0 { cmyk = false } }))
+             Toggle("CMYK", isOn: Binding(get: { cmyk }, set: { if $0 { cmyk = true } }))
+         }
+-        .menuStyle(.button).buttonStyle(.bordered).fixedSize()
++        .menuStyle(.borderlessButton).buttonStyle(.bordered).fixedSize()
+         .help("CMYK writes a printer's inks through the profile in View › CMYK › Profile")
+     }
+ 
+@@ -270,7 +270,7 @@ struct ExportAsSheet: View {
+             }
+             .pickerStyle(.inline).labelsHidden()
+         }
+-        .menuStyle(.button).fixedSize()
++        .menuStyle(.borderlessButton).fixedSize()
+         .help("Other formats: TIFF and PDF\(others.contains(.exr) ? ", and EXR to keep light brighter than white" : "")")
+         if chosen { menu.buttonStyle(.borderedProminent) } else { menu.buttonStyle(.bordered) }
+     }
+@@ -317,9 +317,6 @@ struct JPEGPreview: View {
+     let pixelHeight: Int
+     @Binding var zoom: Double?
+     @Environment(\.displayScale) private var displayScale
+-    @State private var position = ScrollPosition()
+-    @State private var offset = CGPoint.zero
+-    @State private var dragStart: CGPoint?
+ 
+     /// The zoom at which the whole image fits `frame`.
+     static func fitZoom(width: Int, height: Int, in frame: CGSize, displayScale: CGFloat) -> Double {
+@@ -335,27 +332,14 @@ struct JPEGPreview: View {
+         GeometryReader { geometry in
+             if let zoom {
+                 let size = shownSize(zoom)
+-                ScrollView([.horizontal, .vertical]) {
++                PreviewScrollView(size: size) {
+                     // Nearest-neighbor from 100% up, so each pixel of the JPEG and its artifacts shows as it is.
+                     Image(decorative: image, scale: 1).resizable().interpolation(zoom >= 1 ? .none : .high)
+                         .frame(width: size.width, height: size.height)
+                         .background { Self.checkerboard }
+                         .frame(minWidth: geometry.size.width, minHeight: geometry.size.height)
+                 }
+-                .scrollIndicators(.visible)
+-                .scrollPosition($position)
+-                .onScrollGeometryChange(for: CGPoint.self, of: { $0.contentOffset }) { _, new in offset = new }
+-                .gesture(DragGesture(minimumDistance: 1)
+-                    .onChanged { drag in
+-                        let start = dragStart ?? offset
+-                        dragStart = start
+-                        position.scrollTo(point: CGPoint(x: start.x - drag.translation.width, y: start.y - drag.translation.height))
+-                    }
+-                    .onEnded { _ in dragStart = nil })
+                 .onTapGesture(count: 2) { self.zoom = nil }
+-                .onAppear { keepCentered(from: nil, to: zoom, in: geometry.size) }
+-                .onChange(of: zoom) { old, new in keepCentered(from: old, to: new, in: geometry.size) }
+-                .pointerStyle(dragStart == nil ? .grabIdle : .grabActive)
+             } else {
+                 Image(decorative: image, scale: 1).resizable().interpolation(.high).scaledToFit()
+                     .background { Self.checkerboard }
+@@ -385,18 +369,4 @@ struct JPEGPreview: View {
+         CGSize(width: CGFloat(pixelWidth) / max(1, displayScale) * zoom, height: CGFloat(pixelHeight) / max(1, displayScale) * zoom)
+     }
+ 
+-    /// Zooming keeps the middle of the view on the same part of the image; coming from Fit, it starts at the center.
+-    private func keepCentered(from old: Double?, to new: Double?, in view: CGSize) {
+-        guard let new else { return }
+-        let size = shownSize(new)
+-        var middle = CGPoint(x: size.width / 2, y: size.height / 2)
+-        if let old {
+-            let before = shownSize(old)
+-            let fx = before.width > 0 ? (offset.x + min(view.width, before.width) / 2) / before.width : 0.5
+-            let fy = before.height > 0 ? (offset.y + min(view.height, before.height) / 2) / before.height : 0.5
+-            middle = CGPoint(x: fx * size.width, y: fy * size.height)
+-        }
+-        position.scrollTo(point: CGPoint(x: min(max(0, middle.x - view.width / 2), max(0, size.width - view.width)),
+-                                         y: min(max(0, middle.y - view.height / 2), max(0, size.height - view.height))))
+-    }
+ }
+diff --git a/Compositor/UI/FilterSheet.swift b/Compositor/UI/FilterSheet.swift
+index 7771606..964df0a 100644
+--- a/Compositor/UI/FilterSheet.swift
++++ b/Compositor/UI/FilterSheet.swift
+@@ -3,7 +3,7 @@ import SwiftUI
+ 
+ /// The open filter's panel: its settings, Preview, and Cancel / OK.
+ struct FilterSheet: View {
+-    @Bindable var session: EditorSession
++    @ObservedObject var session: EditorSession
+     private var edit: FilterEdit? { session.filterEdit }
+     private var settings: FilterSettings { edit?.settings ?? FilterSettings() }
+     private func update(_ change: (inout FilterSettings) -> Void) {
+diff --git a/Compositor/UI/FloatingPanel.swift b/Compositor/UI/FloatingPanel.swift
+index f7c1649..de8d3fc 100644
+--- a/Compositor/UI/FloatingPanel.swift
++++ b/Compositor/UI/FloatingPanel.swift
+@@ -42,11 +42,12 @@ final class FloatingPanelController: NSObject, NSWindowDelegate {
+         // that option makes AppKit measure the SwiftUI view during its constraint pass,
+         // and SwiftUI's measurement invalidates layout re-entrantly, which AppKit treats
+         // as a fatal exception.
+-        let host = NSHostingView(rootView: AnyView(content.roundedControls()))
++        let host = PanelHostingView(rootView: AnyView(content.roundedControls()))
+         // Docked panels fill the window we size. An intrinsic SwiftUI height of zero (a scroll view
+         // waiting for a proposed height) must not collapse the content.
+         if placement == .dockedToMainWindowRight {
+-            host.sizingOptions = []
++            host.sizesToContent = false
++            if #available(macOS 13, *) { host.sizingOptions = [] }
+             host.autoresizingMask = [.width, .height]
+         }
+         panel.contentView = host
+diff --git a/Compositor/UI/GradientControls.swift b/Compositor/UI/GradientControls.swift
+index 40d01fd..a4193fc 100644
+--- a/Compositor/UI/GradientControls.swift
++++ b/Compositor/UI/GradientControls.swift
+@@ -1,7 +1,7 @@
+ import SwiftUI
+ 
+ struct GradientControls: View {
+-    @Bindable var session: EditorSession
++    @ObservedObject var session: EditorSession
+ 
+     var body: some View {
+         HStack(spacing: 12) {
+diff --git a/Compositor/UI/GridSettingsSheet.swift b/Compositor/UI/GridSettingsSheet.swift
+index 087a0ae..c2ef280 100644
+--- a/Compositor/UI/GridSettingsSheet.swift
++++ b/Compositor/UI/GridSettingsSheet.swift
+@@ -2,7 +2,7 @@ import SwiftUI
+ 
+ /// View > Grid Settings…: every change shows on the canvas at once through `preview`; Cancel puts back what was there.
+ struct GridSettingsSheet: View {
+-    let session: EditorSession
++    @ObservedObject var session: EditorSession
+     let preview: (LayoutGrid, GridAppearance) -> Void
+     let finish: ((LayoutGrid, GridAppearance)?) -> Void
+     @State private var spacing: Int
+diff --git a/Compositor/UI/HeldModifiers.swift b/Compositor/UI/HeldModifiers.swift
+index 53a761e..3676f4a 100644
+--- a/Compositor/UI/HeldModifiers.swift
++++ b/Compositor/UI/HeldModifiers.swift
+@@ -1,14 +1,14 @@
+ import AppKit
+-import Observation
++import Combine
+ 
+ /// The modifier keys held down right now, for controls that show what a held key temporarily changes, as
+ /// Photoshop's options bar does: Command flips Auto Select, Shift flips the aspect-ratio lock.
+ /// Keys held while typing in a text field don't count — ⌘A there shouldn't flicker the options bar.
+-@MainActor @Observable final class HeldModifiers {
++@MainActor final class HeldModifiers: ObservableObject {
+     static let shared = HeldModifiers()
+-    private(set) var flags: NSEvent.ModifierFlags = []
+-    @ObservationIgnored private var monitor: Any?
+-    @ObservationIgnored private var observers: [NSObjectProtocol] = []
++    @Published private(set) var flags: NSEvent.ModifierFlags = []
++    private var monitor: Any?
++    private var observers: [NSObjectProtocol] = []
+ 
+     private init() {
+         monitor = NSEvent.addLocalMonitorForEvents(matching: [.flagsChanged, .keyDown, .leftMouseDown, .leftMouseUp]) { event in
+diff --git a/Compositor/UI/HueSaturationSheet.swift b/Compositor/UI/HueSaturationSheet.swift
+index 0c6ae73..41c676a 100644
+--- a/Compositor/UI/HueSaturationSheet.swift
++++ b/Compositor/UI/HueSaturationSheet.swift
+@@ -3,7 +3,7 @@ import SwiftUI
+ /// Reads and writes the open edit's settings, so sampling from the canvas and the panel's
+ /// own controls always agree.
+ struct HueSaturationSheet: View {
+-    @Bindable var session: EditorSession
++    @ObservedObject var session: EditorSession
+ 
+     private var edit: HueSaturationEdit? { session.hueSaturation }
+     private var current: HueSaturationSettings { edit?.settings ?? HueSaturationSettings() }
+diff --git a/Compositor/UI/IndicatorlessScrollView.swift b/Compositor/UI/IndicatorlessScrollView.swift
+index 44add06..2163d06 100644
+--- a/Compositor/UI/IndicatorlessScrollView.swift
++++ b/Compositor/UI/IndicatorlessScrollView.swift
+@@ -6,43 +6,43 @@ import SwiftUI
+ struct IndicatorlessScrollView<Content: View>: NSViewRepresentable {
+     @ViewBuilder let content: () -> Content
+ 
+-    func makeNSView(context: Context) -> Container {
+-        Container(rootView: content())
++    func makeNSView(context: Context) -> IndicatorlessScrollContainer {
++        IndicatorlessScrollContainer(rootView: AnyView(content()))
+     }
+ 
+-    func updateNSView(_ view: Container, context: Context) {
+-        view.host.rootView = content()
++    func updateNSView(_ view: IndicatorlessScrollContainer, context: Context) {
++        view.host.rootView = AnyView(content())
+         view.host.invalidateIntrinsicContentSize()
+         view.updateDocumentSize()
+     }
++}
++
++final class IndicatorlessScrollContainer: NSScrollView {
++    let host: NSHostingView<AnyView>
++
++    init(rootView: AnyView) {
++        host = NSHostingView(rootView: rootView)
++        super.init(frame: .zero)
++        drawsBackground = false
++        borderType = .noBorder
++        hasVerticalScroller = false
++        hasHorizontalScroller = false
++        horizontalScrollElasticity = .none
++        documentView = host
++        updateDocumentSize()
++    }
++
++    required init?(coder: NSCoder) { nil }
++
++    override func layout() {
++        super.layout()
++        updateDocumentSize()
++    }
+ 
+-    final class Container: NSScrollView {
+-        let host: NSHostingView<Content>
+-
+-        init(rootView: Content) {
+-            host = NSHostingView(rootView: rootView)
+-            super.init(frame: .zero)
+-            drawsBackground = false
+-            borderType = .noBorder
+-            hasVerticalScroller = false
+-            hasHorizontalScroller = false
+-            horizontalScrollElasticity = .none
+-            documentView = host
+-            updateDocumentSize()
+-        }
+-
+-        required init?(coder: NSCoder) { nil }
+-
+-        override func layout() {
+-            super.layout()
+-            updateDocumentSize()
+-        }
+-
+-        func updateDocumentSize() {
+-            let height = host.fittingSize.height
+-            let size = NSSize(width: 56, height: height)
+-            if host.frame.size != size { host.setFrameSize(size) }
+-            verticalScrollElasticity = height > contentView.bounds.height + 1 ? .allowed : .none
+-        }
++    func updateDocumentSize() {
++        let height = host.fittingSize.height
++        let size = NSSize(width: 56, height: height)
++        if host.frame.size != size { host.setFrameSize(size) }
++        verticalScrollElasticity = height > contentView.bounds.height + 1 ? .allowed : .none
+     }
+ }
+diff --git a/Compositor/UI/KeyboardShortcuts.swift b/Compositor/UI/KeyboardShortcuts.swift
+index 48ec538..cd8f681 100644
+--- a/Compositor/UI/KeyboardShortcuts.swift
++++ b/Compositor/UI/KeyboardShortcuts.swift
+@@ -1,5 +1,6 @@
+ import AppKit
+ import SwiftUI
++import Combine
+ 
+ struct ShortcutChord: Codable, Equatable, Hashable {
+     var key: String
+@@ -43,7 +44,8 @@ struct ShortcutChord: Codable, Equatable, Hashable {
+     }
+     /// A key equivalent as the list records it: SwiftUI's `.delete` (U+0008) is the Delete key, recorded as U+007F.
+     static func recorded(_ key: KeyEquivalent) -> String {
+-        key == .delete ? "\u{7f}" : String(key.character)
++        // Compare Characters, not KeyEquivalent itself: its Equatable conformance is macOS 14+.
++        key.character == "\u{8}" ? "\u{7f}" : String(key.character)
+     }
+     var cocoaModifiers: NSEvent.ModifierFlags {
+         var flags: NSEvent.ModifierFlags = []
+@@ -143,11 +145,11 @@ struct ShortcutDefinition: Identifiable {
+     }()
+ }
+ 
+-@MainActor @Observable
+-final class ShortcutSettings {
++@MainActor
++final class ShortcutSettings: ObservableObject {
+     static let shared = ShortcutSettings()
+-    private(set) var overrides: [String: ShortcutChord] = [:]
+-    @ObservationIgnored private let panel = FloatingPanelController(name: "keyboardShortcuts")
++    @Published private(set) var overrides: [String: ShortcutChord] = [:]
++    private let panel = FloatingPanelController(name: "keyboardShortcuts")
+     private static let storageKey = "keyboardShortcuts.v1"
+     private let defaults: UserDefaults
+     /// `defaults` is the app's own everywhere but tests, which use a throwaway suite.
+@@ -250,14 +252,23 @@ final class ShortcutSettings {
+ extension View {
+     func configuredNativeShortcut(_ key: KeyEquivalent, modifiers: EventModifiers = []) -> some View {
+         // nil when the person cleared it: no key at all.
+-        keyboardShortcut(ShortcutSettings.shared.native(key, modifiers: modifiers).keyboardShortcut)
++        let chord = ShortcutSettings.shared.native(key, modifiers: modifiers)
++        guard let first = chord.key.first else { return keyboardShortcut(key, modifiers: modifiers) }
++        return keyboardShortcut(first == "\u{7f}" ? .delete : KeyEquivalent(first), modifiers: chord.eventModifiers)
+     }
+     func configuredKeyboardShortcut(_ key: KeyEquivalent, modifiers: EventModifiers = .command) -> some View {
+-        keyboardShortcut(ShortcutSettings.shared.menu(key, modifiers: modifiers).keyboardShortcut)
++        let chord = ShortcutSettings.shared.menu(key, modifiers: modifiers)
++        guard let first = chord.key.first else { return keyboardShortcut(key, modifiers: modifiers) }
++        return keyboardShortcut(first == "\u{7f}" ? .delete : KeyEquivalent(first), modifiers: chord.eventModifiers)
+     }
+     /// For a menu item that ships without a key: the one the person gave it in Keyboard Shortcuts, if any.
++    @ViewBuilder
+     func assignableShortcut(_ title: String) -> some View {
+-        keyboardShortcut(ShortcutSettings.shared.assigned(title))
++        if let shortcut = ShortcutSettings.shared.assigned(title) {
++            keyboardShortcut(shortcut.key, modifiers: shortcut.modifiers)
++        } else {
++            self
++        }
+     }
+ }
+ 
+diff --git a/Compositor/UI/LassoControls.swift b/Compositor/UI/LassoControls.swift
+index 4817a69..f022879 100644
+--- a/Compositor/UI/LassoControls.swift
++++ b/Compositor/UI/LassoControls.swift
+@@ -1,7 +1,7 @@
+ import SwiftUI
+ 
+ struct LassoControls: View {
+-    @Bindable var session: EditorSession
++    @ObservedObject var session: EditorSession
+ 
+     var body: some View {
+         HStack(spacing: 12) {
+@@ -185,7 +185,7 @@ struct PolygonalLassoToolIcon: View {
+ 
+ /// Selection modifiers share the filter panels' floating window and control layout.
+ struct SelectionAmountSheet: View {
+-    let session: EditorSession
++    @ObservedObject var session: EditorSession
+     let operation: EditorSession.SelectionAmountOperation
+     @State private var input: String
+     @FocusState private var focused: Bool
+diff --git a/Compositor/UI/LayerAppearanceControls.swift b/Compositor/UI/LayerAppearanceControls.swift
+index 353a0c3..7ea0b54 100644
+--- a/Compositor/UI/LayerAppearanceControls.swift
++++ b/Compositor/UI/LayerAppearanceControls.swift
+@@ -1,7 +1,7 @@
+ import SwiftUI
+ 
+ struct LayerAppearanceControls: View {
+-    @Bindable var session: EditorSession
++    @ObservedObject var session: EditorSession
+     let layerID: UUID?
+     @State private var percentage = "100"
+     @State private var stepper = ArrowStepper()
+diff --git a/Compositor/UI/LayerMaskMenu.swift b/Compositor/UI/LayerMaskMenu.swift
+index 45af07e..b7117c1 100644
+--- a/Compositor/UI/LayerMaskMenu.swift
++++ b/Compositor/UI/LayerMaskMenu.swift
+@@ -4,7 +4,7 @@ import SwiftUI
+ /// selection. Option-click adds the opposite: all black, or hiding the selection.
+ /// Enable/Disable and Delete live in the layer's context menu.
+ struct LayerMaskMenu: View {
+-    let session: EditorSession
++    @ObservedObject var session: EditorSession
+     var body: some View {
+         Button {
+             session.addMask(revealing: NSApp.currentEvent?.modifierFlags.contains(.option) != true)
+@@ -20,7 +20,7 @@ struct LayerMaskMenu: View {
+ /// Over the canvas while it shows a mask by itself: whose mask it is, and a way back to the composite besides
+ /// Option-clicking the thumbnail again. Built in AppKit, as the canvas under it is, so its button gets its clicks.
+ struct MaskAloneBadge: NSViewRepresentable {
+-    let session: EditorSession
++    @ObservedObject var session: EditorSession
+     let layer: ImageLayer
+     func makeNSView(context: Context) -> CanvasPillView {
+         CanvasPillView(symbol: "rectangle.inset.filled", closeLabel: "Stop viewing the mask",
+diff --git a/Compositor/UI/LayersPanel.swift b/Compositor/UI/LayersPanel.swift
+index 38dafad..4bc36ad 100644
+--- a/Compositor/UI/LayersPanel.swift
++++ b/Compositor/UI/LayersPanel.swift
+@@ -1,7 +1,7 @@
+ import SwiftUI
+ 
+ struct LayersPanel: View {
+-    @Bindable var session: EditorSession
++    @ObservedObject var session: EditorSession
+     /// Dragging the panel's left edge sets it, within `widths`.
+     var width: CGFloat = 252
+     /// No narrower than the footer: its icons can't shrink, and a footer wider than the panel pushed everything in
+diff --git a/Compositor/UI/LevelsSheet.swift b/Compositor/UI/LevelsSheet.swift
+index b9fdf72..27c1397 100644
+--- a/Compositor/UI/LevelsSheet.swift
++++ b/Compositor/UI/LevelsSheet.swift
+@@ -1,7 +1,7 @@
+ import SwiftUI
+ 
+ struct LevelsSheet: View {
+-    @Bindable var session: EditorSession
++    @ObservedObject var session: EditorSession
+     private var edit: LevelsEdit? { session.levels }
+     private var settings: LevelsSettings { edit?.settings ?? LevelsSettings() }
+     private var current: LevelRange { settings.current }
+diff --git a/Compositor/UI/MontereyViewCompatibility.swift b/Compositor/UI/MontereyViewCompatibility.swift
+new file mode 100644
+index 0000000..3c2147b
+--- /dev/null
++++ b/Compositor/UI/MontereyViewCompatibility.swift
+@@ -0,0 +1,82 @@
++import SwiftUI
++import AppKit
++
++final class PanelHostingView: NSHostingView<AnyView> {
++    var sizesToContent = true
++    override var intrinsicContentSize: NSSize {
++        sizesToContent ? super.intrinsicContentSize : NSSize(width: NSView.noIntrinsicMetric, height: NSView.noIntrinsicMetric)
++    }
++}
++
++private struct GridSpacing: EnvironmentKey {
++    static let defaultValue: CGFloat = 8
++}
++
++private extension EnvironmentValues {
++    var legacyGridSpacing: CGFloat {
++        get { self[GridSpacing.self] }
++        set { self[GridSpacing.self] = newValue }
++    }
++}
++
++/// Small form grids used by the editor, laid out with Monterey stack primitives.
++struct Grid<Content: View>: View {
++    var alignment: Alignment
++    var horizontalSpacing: CGFloat
++    var verticalSpacing: CGFloat
++    var content: Content
++
++    init(alignment: Alignment = .center, horizontalSpacing: CGFloat = 8,
++         verticalSpacing: CGFloat = 8, @ViewBuilder content: () -> Content) {
++        self.alignment = alignment
++        self.horizontalSpacing = horizontalSpacing
++        self.verticalSpacing = verticalSpacing
++        self.content = content()
++    }
++
++    var body: some View {
++        VStack(alignment: alignment.horizontal, spacing: verticalSpacing) { content }
++            .environment(\.legacyGridSpacing, horizontalSpacing)
++    }
++}
++
++struct GridRow<Content: View>: View {
++    @Environment(\.legacyGridSpacing) private var spacing
++    var content: Content
++    init(@ViewBuilder content: () -> Content) { self.content = content() }
++    var body: some View { HStack(alignment: .firstTextBaseline, spacing: spacing) { content } }
++}
++
++
++enum LegacyScrollIndicators { case never, visible }
++
++extension ScrollView {
++    func scrollIndicators(_ visibility: LegacyScrollIndicators) -> some View {
++        ScrollView(axes, showsIndicators: visibility == .visible) { content }
++    }
++}
++
++extension View {
++    // These overloads intentionally use the Monterey change observer. Capturing the
++    // previous value in each view update preserves the old/new callback contract.
++    func onChange<Value: Equatable>(of value: Value,
++                                    perform action: @escaping (Value, Value) -> Void) -> some View {
++        onChange(of: value) { [value] newValue in action(value, newValue) }
++    }
++
++    func onChange<Value: Equatable>(of value: Value,
++                                    perform action: @escaping () -> Void) -> some View {
++        onChange(of: value) { _ in action() }
++    }
++
++    func onGeometryChange<Value: Equatable>(for type: Value.Type,
++                                            of transform: @escaping (GeometryProxy) -> Value,
++                                            action: @escaping (Value) -> Void) -> some View {
++        background(GeometryReader { proxy in
++            let value = transform(proxy)
++            Color.clear
++                .onAppear { action(value) }
++                .onChange(of: value, perform: action)
++        })
++    }
++}
+diff --git a/Compositor/UI/NativeLayerList.swift b/Compositor/UI/NativeLayerList.swift
+index beafe75..8c2796a 100644
+--- a/Compositor/UI/NativeLayerList.swift
++++ b/Compositor/UI/NativeLayerList.swift
+@@ -3,7 +3,7 @@ import SwiftUI
+ 
+ /// Native mouse-down selection and drag tracking, without a double-click delay.
+ struct NativeLayerList: NSViewRepresentable {
+-    let session: EditorSession
++    @ObservedObject var session: EditorSession
+     func makeCoordinator() -> Coordinator { Coordinator(session: session) }
+ 
+     func makeNSView(context: Context) -> NSScrollView {
+diff --git a/Compositor/UI/NavigationToolHeader.swift b/Compositor/UI/NavigationToolHeader.swift
+index 6b22b4a..c260e5a 100644
+--- a/Compositor/UI/NavigationToolHeader.swift
++++ b/Compositor/UI/NavigationToolHeader.swift
+@@ -1,7 +1,7 @@
+ import SwiftUI
+ 
+ struct NavigationToolHeader: View {
+-    @Bindable var session: EditorSession
++    @ObservedObject var session: EditorSession
+     @State private var zoomText = ""
+     @State private var displayedZoomText = ""
+     @State private var stepper = ArrowStepper()
+diff --git a/Compositor/UI/NavigatorMinimap.swift b/Compositor/UI/NavigatorMinimap.swift
+index 9720520..8ec1dcd 100644
+--- a/Compositor/UI/NavigatorMinimap.swift
++++ b/Compositor/UI/NavigatorMinimap.swift
+@@ -5,7 +5,7 @@ import SwiftUI
+ /// the document. The whole document in small, with a box in the accent color around what the canvas shows; clicking
+ /// or dragging in it moves the view there. Its picture is redrawn a moment after edits settle, and only while it shows.
+ struct NavigatorMinimap: View {
+-    @Bindable var session: EditorSession
++    @ObservedObject var session: EditorSession
+     @State private var picture: CGImage?
+ 
+     static let zoomShown: CGFloat = 3
+@@ -47,13 +47,13 @@ struct NavigatorMinimap: View {
+             .gesture(DragGesture(minimumDistance: 0).onChanged { value in
+                 session.viewport.centerView(on: geometry.documentPoint(for: value.location), documentSize: document.size)
+             })
+-            .pointerStyle(.default)
++            .onHover { inside in if inside { NSCursor.arrow.push() } else { NSCursor.pop() } }
+             .accessibilityElement()
+             .accessibilityLabel("Navigator")
+             .accessibilityHint("Click or drag to move the view")
+             .task(id: RenderKey(document: session.document, revision: session.brushRevision)) {
+                 // Edits settle first, so a stroke or a drag redraws the picture once, afterwards.
+-                if picture != nil { try? await Task.sleep(for: .milliseconds(250)) }
++                if picture != nil { try? await Task.sleep(nanoseconds: 250_000_000) }
+                 guard !Task.isCancelled else { return }
+                 picture = session.navigatorImage(maxSide: Self.picturePixels)
+             }
+diff --git a/Compositor/UI/NewCanvasSheet.swift b/Compositor/UI/NewCanvasSheet.swift
+index 39f1f62..0f08122 100644
+--- a/Compositor/UI/NewCanvasSheet.swift
++++ b/Compositor/UI/NewCanvasSheet.swift
+@@ -59,7 +59,7 @@ nonisolated enum NewCanvasBackground: String, CaseIterable, Sendable {
+ }
+ 
+ struct NewCanvasSheet: View {
+-    let session: EditorSession
++    @ObservedObject var session: EditorSession
+     var onCreate: ((Int, Int, Double, CGColor?) -> Void)? = nil
+     var onOpen: (() -> Void)? = nil
+     @State private var width = "1920"
+@@ -119,7 +119,7 @@ struct NewCanvasSheet: View {
+                             .contentShape(Rectangle())
+                             .padding(.trailing, -10)
+                     }
+-                    .menuStyle(.button).buttonStyle(.plain).menuIndicator(.hidden).fixedSize()
++                    .menuStyle(.borderlessButton).buttonStyle(.plain).menuIndicator(.hidden).fixedSize()
+                     .help("Preset sizes for screens and common formats".localized)
+                     .accessibilityLabel("Preset sizes")
+                 }
+diff --git a/Compositor/UI/NumericScrub.swift b/Compositor/UI/NumericScrub.swift
+index 9d2bb0b..6bfd266 100644
+--- a/Compositor/UI/NumericScrub.swift
++++ b/Compositor/UI/NumericScrub.swift
+@@ -16,15 +16,10 @@ private struct NumericScrub<Value: BinaryFloatingPoint>: ViewModifier {
+     func body(content: Content) -> some View {
+         content
+             .contentShape(Rectangle())
+-            .onContinuousHover { phase in
+-                switch phase {
+-                case .active(_):
+-                    isHovering = true
+-                    NSCursor.resizeLeftRight.set()
+-                case .ended:
+-                    isHovering = false
+-                    if startValue == nil { NSCursor.arrow.set() }
+-                }
++            .onHover { hovering in
++                isHovering = hovering
++                if hovering { NSCursor.resizeLeftRight.set() }
++                else if startValue == nil { NSCursor.arrow.set() }
+             }
+             .simultaneousGesture(DragGesture(minimumDistance: 1)
+                 .onChanged { drag in
+diff --git a/Compositor/UI/PreviewScrollView.swift b/Compositor/UI/PreviewScrollView.swift
+new file mode 100644
+index 0000000..af914a9
+--- /dev/null
++++ b/Compositor/UI/PreviewScrollView.swift
+@@ -0,0 +1,69 @@
++import SwiftUI
++import AppKit
++
++struct PreviewScrollView<Content: View>: NSViewRepresentable {
++    let size: CGSize
++    let content: Content
++
++    init(size: CGSize, @ViewBuilder content: () -> Content) {
++        self.size = size
++        self.content = content()
++    }
++
++    func makeNSView(context: Context) -> NSScrollView {
++        let scroll = NSScrollView()
++        scroll.hasHorizontalScroller = true
++        scroll.hasVerticalScroller = true
++        scroll.drawsBackground = false
++        scroll.documentView = PannableHostingView(rootView: AnyView(content))
++        return scroll
++    }
++
++    func updateNSView(_ scroll: NSScrollView, context: Context) {
++        guard let host = scroll.documentView as? PannableHostingView else { return }
++        let viewport = scroll.contentView.bounds
++        let old = host.frame.size
++        let next = CGSize(width: max(size.width, viewport.width), height: max(size.height, viewport.height))
++        host.rootView = AnyView(content)
++        if old != next {
++            let fraction = CGPoint(x: old.width > 0 ? viewport.midX / old.width : 0.5,
++                                   y: old.height > 0 ? viewport.midY / old.height : 0.5)
++            host.setFrameSize(next)
++            let origin = CGPoint(x: min(max(0, fraction.x * next.width - viewport.width / 2), max(0, next.width - viewport.width)),
++                                 y: min(max(0, fraction.y * next.height - viewport.height / 2), max(0, next.height - viewport.height)))
++            scroll.contentView.scroll(to: origin)
++            scroll.reflectScrolledClipView(scroll.contentView)
++        }
++    }
++}
++
++private final class PannableHostingView: NSHostingView<AnyView> {
++    private var start: CGPoint?
++    private var origin = CGPoint.zero
++
++    override func resetCursorRects() {
++        addCursorRect(bounds, cursor: .openHand)
++    }
++
++    override func mouseDown(with event: NSEvent) {
++        if event.clickCount == 2 { super.mouseDown(with: event); return }
++        start = event.locationInWindow
++        origin = enclosingScrollView?.contentView.bounds.origin ?? .zero
++        NSCursor.closedHand.push()
++    }
++
++    override func mouseDragged(with event: NSEvent) {
++        guard let start, let scroll = enclosingScrollView else { return }
++        let location = event.locationInWindow
++        let proposed = CGPoint(x: origin.x - location.x + start.x,
++                               y: origin.y + (isFlipped ? 1 : -1) * (location.y - start.y))
++        let clip = scroll.contentView
++        clip.scroll(to: clip.constrainBoundsRect(CGRect(origin: proposed, size: clip.bounds.size)).origin)
++        scroll.reflectScrolledClipView(clip)
++    }
++
++    override func mouseUp(with event: NSEvent) {
++        if start != nil { start = nil; NSCursor.pop() }
++        else { super.mouseUp(with: event) }
++    }
++}
+diff --git a/Compositor/UI/ProjectTabs.swift b/Compositor/UI/ProjectTabs.swift
+index a8db6e6..5937de1 100644
+--- a/Compositor/UI/ProjectTabs.swift
++++ b/Compositor/UI/ProjectTabs.swift
+@@ -5,7 +5,12 @@ import Combine
+ 
+ struct ProjectWorkspaceView: View {
+     let applicationDelegate: CompositorApplicationDelegate
+-    private var workspace: ProjectWorkspace { applicationDelegate.workspace }
++    @ObservedObject private var workspace: ProjectWorkspace
++
++    init(applicationDelegate: CompositorApplicationDelegate) {
++        self.applicationDelegate = applicationDelegate
++        self.workspace = applicationDelegate.workspace
++    }
+     var body: some View {
+         ContentView(session: workspace.current.session, applicationDelegate: applicationDelegate)
+             .id(workspace.current.id)
+@@ -48,7 +53,7 @@ private enum TabDragPhase {
+ }
+ 
+ struct ProjectTabStrip: View {
+-    let workspace: ProjectWorkspace
++    @ObservedObject var workspace: ProjectWorkspace
+     /// An external pasteboard drag (a file, or a layer from the panel) is in the air over the app.
+     @State private var dragging = false
+     @State private var dragChangeCount = NSPasteboard(name: .drag).changeCount
+diff --git a/Compositor/UI/RawDevelopSheet.swift b/Compositor/UI/RawDevelopSheet.swift
+index bbc52d4..1caee45 100644
+--- a/Compositor/UI/RawDevelopSheet.swift
++++ b/Compositor/UI/RawDevelopSheet.swift
+@@ -4,7 +4,7 @@ import SwiftUI
+ /// than assumed. The preview develops at screen size while the sliders move; the import then
+ /// develops the full frame once.
+ struct RawDevelopSheet: View {
+-    let session: EditorSession
++    @ObservedObject var session: EditorSession
+     let url: URL
+     @State private var settings: RawDevelopSettings
+     @State private var preview: CGImage?
+@@ -82,7 +82,7 @@ struct RawDevelopSheet: View {
+     private func refreshPreview() async {
+         // Just enough to coalesce a burst of slider changes; the render itself is nearly free once
+         // the file's filter is warm (see RawImporter.Queue).
+-        if revision > 0 { try? await Task.sleep(for: .milliseconds(60)) }
++        if revision > 0 { try? await Task.sleep(nanoseconds: 60_000_000) }
+         guard !Task.isCancelled else { return }
+         working = true
+         defer { working = false }
+diff --git a/Compositor/UI/ShapeControls.swift b/Compositor/UI/ShapeControls.swift
+index 6b4396d..304e2ff 100644
+--- a/Compositor/UI/ShapeControls.swift
++++ b/Compositor/UI/ShapeControls.swift
+@@ -1,7 +1,7 @@
+ import SwiftUI
+ 
+ struct ShapeControls: View {
+-    @Bindable var session: EditorSession
++    @ObservedObject var session: EditorSession
+ 
+     var body: some View {
+         HStack(spacing: 12) {
+diff --git a/Compositor/UI/TransformInspector.swift b/Compositor/UI/TransformInspector.swift
+index 892ecb2..bef7615 100644
+--- a/Compositor/UI/TransformInspector.swift
++++ b/Compositor/UI/TransformInspector.swift
+@@ -1,7 +1,7 @@
+ import SwiftUI
+ 
+ struct TransformInspector: View {
+-    @Bindable var session: EditorSession
++    @ObservedObject var session: EditorSession
+     private var value: LayerTransform {
+         session.transformEdit?.draft ?? session.activeLayer.map { session.editedTransform(for: $0) }
+             ?? LayerTransform(origin: .zero, size: CGSize(width: 1, height: 1))
+diff --git a/Compositor/UI/TypeControls.swift b/Compositor/UI/TypeControls.swift
+index cb3208b..f88bef3 100644
+--- a/Compositor/UI/TypeControls.swift
++++ b/Compositor/UI/TypeControls.swift
+@@ -2,7 +2,7 @@ import SwiftUI
+ import AppKit
+ 
+ struct TypeControls: View {
+-    @Bindable var session: EditorSession
++    @ObservedObject var session: EditorSession
+     private func value<T>(_ key: WritableKeyPath<LayerTextStyle, T>) -> Binding<T> {
+         Binding(get: { session.currentTextStyle[keyPath: key] }, set: { value in
+             session.changeTextStyle { $0[keyPath: key] = value }
+@@ -114,7 +114,7 @@ private struct TypeFontPicker: NSViewRepresentable {
+     func makeNSView(context: Context) -> NSPopUpButton {
+         let button = FixedWidthPopUpButton(frame: .zero, pullsDown: false)
+         if !fontName.isEmpty { button.addItem(withTitle: fontName) }
+-        button.borderShape = .capsule
++        button.bezelStyle = .rounded
+         // A long font name is cut off at its end rather than widening the control or scrolling its start away.
+         button.cell
